@@ -1,0 +1,11 @@
+.DS_Store
+*.json
+*.html
+*_files/
+Creations _ Freepik AI_files/
+Creations _ Freepik AI.html
+freepik_history_*.json
+
+# Local scratch
+*.log
+*.zip
