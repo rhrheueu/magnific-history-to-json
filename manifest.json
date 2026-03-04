@@ -21,9 +21,14 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["downloads", "activeTab", "scripting"],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": ["downloads", "activeTab", "scripting", "storage", "contextMenus"],
   "host_permissions": [
     "https://*.freepik.com/*",
-    "https://freepik.com/*"
+    "https://freepik.com/*",
+    "https://*.cdnpk.net/*"
   ]
 }

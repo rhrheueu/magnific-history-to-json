@@ -2,6 +2,7 @@
 *.json
 !manifest.json
 *.html
+!options.html
 *_files/
 Creations _ Freepik AI_files/
 Creations _ Freepik AI.html
@@ -10,3 +11,6 @@ freepik_history_*.json
 # Local scratch
 *.log
 *.zip
+Guseva/
+template_pages/
+ALGORITHM_CEREBRO_FREEPIK_MAPPING.md

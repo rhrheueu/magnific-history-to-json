@@ -7,13 +7,19 @@
   window.__freepikExporterRunning = true;
 
   // 1) Проверка страницы
+  function isSupportedProjectsPath(pathname) {
+    return /^\/pikaso\/projects(?:\/|$)/.test(pathname || "");
+  }
+
   const ok =
     location.hostname === "www.freepik.com" &&
-    location.pathname.startsWith("/pikaso/projects/history");
+    isSupportedProjectsPath(location.pathname);
 
   if (!ok) {
     console.warn("Freepik exporter: wrong page:", location.href);
-    alert("Freepik exporter: open https://www.freepik.com/pikaso/projects/history first.");
+    alert(
+      "Freepik exporter: open https://www.freepik.com/pikaso/projects/ (home or a specific project) first."
+    );
     window.__freepikExporterRunning = false;
     return;
   }
@@ -22,14 +28,28 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const norm = (s) => (s || "").trim().toLowerCase();
   const uniq = (arr) => Array.from(new Set(arr));
+  const runtimeOptions =
+    window.__freepikExporterOptions && typeof window.__freepikExporterOptions === "object"
+      ? window.__freepikExporterOptions
+      : {};
+  delete window.__freepikExporterOptions;
+  const exportMode = runtimeOptions.exportMode === "text_only" ? "text_only" : "with_images";
   const SETTINGS = {
     // Сколько циклов подряд без новых промптов считать концом ленты.
     // Увеличьте, если страница долго подгружает элементы.
-    endCheckCycles: 30,
+    endCheckCycles: 60,
     // Лимит итераций (страховка от вечного цикла).
-    maxIters: 5000,
+    maxIters: 8000,
     // Пауза между итерациями (мс).
-    stepDelayMs: 250
+    stepDelayMs: 700,
+    // Дополнительная пауза после скролла, чтобы виртуальный список успел дорендерить пару header/grid.
+    postScrollSettleMs: 220,
+    // Режим экспорта: with_images | text_only
+    exportMode,
+    // Экспортировать превью-изображения рядом с JSON.
+    exportPreviewImages: exportMode !== "text_only",
+    // Сколько раз пробовать достать full prompt через кнопку Copy.
+    copyPromptMaxAttempts: 4
   };
 
   // UI прогресса
@@ -109,6 +129,7 @@
     document.head.appendChild(style);
 
     const overlay = document.createElement("div");
+    const modeLabel = SETTINGS.exportPreviewImages ? "с картинками" : "только текст";
     overlay.id = "freepik-exporter-overlay";
     overlay.innerHTML = `
       <div id="freepik-exporter-card">
@@ -120,7 +141,7 @@
         <div id="freepik-exporter-actions">
           <button id="freepik-exporter-stop">Stop</button>
         </div>
-        <div id="freepik-exporter-note">Порог конца: ${SETTINGS.endCheckCycles} циклов без новых промптов.</div>
+        <div id="freepik-exporter-note">Режим: ${modeLabel}. Порог конца: ${SETTINGS.endCheckCycles} циклов без новых промптов.</div>
       </div>
     `;
     document.body.appendChild(overlay);
@@ -151,8 +172,31 @@
     };
   }
 
-  // Попытка найти “реальный” скролл-контейнер (лента History часто скроллится внутри div)
+  // Попытка найти “реальный” скролл-контейнер (лента часто скроллится внутри div)
+  function isScrollableY(el) {
+    if (!el || el === document.documentElement || el === document.body) return false;
+    const style = window.getComputedStyle(el);
+    const overflowY = style?.overflowY || "";
+    if (!/(auto|scroll|overlay)/i.test(overflowY)) return false;
+    return el.scrollHeight - el.clientHeight > 120;
+  }
+
+  function findScrollableAncestor(el) {
+    let cur = el?.parentElement || null;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      if (isScrollableY(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
   function pickScroller() {
+    // 1) Приоритет: скролл-родитель у элементов ленты
+    const firstFeedEl = document.querySelector('[data-cy="feed-virtual-item"]');
+    const feedScroller = findScrollableAncestor(firstFeedEl);
+    if (feedScroller) return feedScroller;
+
+    // 2) Fallback: самый “глубокий” scrollHeight-кандидат
     const divs = Array.from(document.querySelectorAll("div"));
     const candidates = divs
       .map((el) => {
@@ -195,13 +239,181 @@
     return text.replace(/[-_]+/g, " ").trim();
   }
 
+  function toAbsoluteUrl(url) {
+    try {
+      return new URL(String(url || ""), location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function padNum(value, size) {
+    return String(value).padStart(size, "0");
+  }
+
+  function formatExportTimestamp(date) {
+    return [
+      padNum(date.getDate(), 2),
+      padNum(date.getMonth() + 1, 2),
+      String(date.getFullYear()).slice(-2),
+      padNum(date.getHours(), 2),
+      padNum(date.getMinutes(), 2)
+    ].join(".");
+  }
+
+  function sanitizeFilenamePart(value, fallback) {
+    const cleaned = String(value || "")
+      .trim()
+      .replace(/[\\/:*?"<>|]+/g, " ")
+      .replace(/\s+/g, "_")
+      .replace(/[^\p{L}\p{N}._-]+/gu, "_")
+      .replace(/_+/g, "_")
+      .replace(/^[_\-.]+|[_\-.]+$/g, "")
+      .slice(0, 48);
+    return cleaned || fallback;
+  }
+
+  function parseProjectPathSegment() {
+    const match = location.pathname.match(/^\/pikaso\/projects\/([^/?#]+)/);
+    return match?.[1] || "home";
+  }
+
+  function getExportContext() {
+    const accountFromHeader = cleanPromptText(
+      document.querySelector('[data-cy="header-current-project-link"] span')?.textContent ||
+        document.querySelector('[data-cy="header-current-project-link"]')?.textContent
+    );
+    const accountFromSidebar = cleanPromptText(
+      document
+        .querySelector('[data-cy="projects-selector-sidebar-trigger"]')
+        ?.textContent?.replace(/^[A-Z]\s+/, "")
+    );
+    const accountLabel = accountFromHeader || accountFromSidebar || "account";
+
+    const topBarEl = document.querySelector('[data-cy="projects-top-bar"]');
+    const topBarFirstColumnText = cleanPromptText(topBarEl?.firstElementChild?.textContent);
+    const topBarWholeText = cleanPromptText(topBarEl?.textContent)
+      .replace(/\bnew\s+folder\b/i, "")
+      .trim();
+
+    const pathSegment = parseProjectPathSegment();
+    const pathProjectLabel =
+      pathSegment === "home" || pathSegment === "history" ? pathSegment : `project_${pathSegment.slice(0, 8)}`;
+    const projectLabel =
+      pathSegment === "home" || pathSegment === "history"
+        ? pathSegment
+        : topBarFirstColumnText || topBarWholeText || pathProjectLabel;
+
+    const projectIdSuffix = /^[a-f0-9-]{8,}$/i.test(pathSegment) ? pathSegment.slice(0, 8) : "";
+
+    return {
+      accountLabel,
+      projectLabel,
+      projectIdSuffix
+    };
+  }
+
+  function getImageExtFromUrl(url) {
+    try {
+      const pathname = new URL(url).pathname || "";
+      const ext = pathname.split(".").pop()?.toLowerCase() || "";
+      if (/^(jpg|jpeg|png|webp|gif|bmp|avif)$/i.test(ext)) return ext === "jpeg" ? "jpg" : ext;
+    } catch {}
+    return "jpg";
+  }
+
+  function cleanIdForFilename(value, fallback) {
+    const cleaned = String(value || "")
+      .replace(/[^\w-]+/g, "")
+      .slice(0, 24);
+    return cleaned || fallback;
+  }
+
+  function cleanPromptText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function looksPromptTruncated(text) {
+    return /(?:\.\.\.|…)\s*$/.test(text || "");
+  }
+
+  function pickBetterPrompt(current, next) {
+    const a = cleanPromptText(current);
+    const b = cleanPromptText(next);
+    if (!a) return b;
+    if (!b) return a;
+    if (looksPromptTruncated(a) && !looksPromptTruncated(b)) return b;
+    if (b.length > a.length) return b;
+    return a;
+  }
+
+  async function extractPromptViaCopy(headerEl) {
+    const copyBtn = headerEl.querySelector('[data-cy="feed-family-copy-prompt-button"]');
+    if (!copyBtn) return "";
+
+    const clipboard = navigator?.clipboard;
+    const originalWriteText =
+      clipboard && typeof clipboard.writeText === "function" ? clipboard.writeText : null;
+    let captured = "";
+    const onCopy = (e) => {
+      const text = cleanPromptText(e?.clipboardData?.getData("text/plain"));
+      if (text) captured = text;
+      // Не трогаем системный буфер обмена пользователя во время парсинга.
+      e.preventDefault();
+    };
+
+    try {
+      document.addEventListener("copy", onCopy, false);
+      if (originalWriteText) {
+        clipboard.writeText = async (value) => {
+          captured = cleanPromptText(value);
+        };
+      }
+      copyBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      await sleep(90);
+    } catch {
+      return "";
+    } finally {
+      document.removeEventListener("copy", onCopy, false);
+      try {
+        if (originalWriteText) clipboard.writeText = originalWriteText;
+      } catch {}
+    }
+
+    return captured;
+  }
+
   function parseHeader(headerEl) {
     const promptEl = headerEl.querySelector('[data-cy="feed-item-prompt"]');
-    const prompt = promptEl?.innerText?.trim() || "";
-    const tags = Array.from(headerEl.querySelectorAll('[data-cy="feed-item-tags"]'))
-      .map((el) => el.innerText?.trim())
+    const attrPromptCandidates = [
+      promptEl?.getAttribute("title"),
+      promptEl?.getAttribute("aria-label"),
+      promptEl?.getAttribute("data-prompt"),
+      promptEl?.getAttribute("data-full-text")
+    ]
+      .map(cleanPromptText)
       .filter(Boolean);
-    return { prompt, tags };
+
+    let prompt = cleanPromptText(promptEl?.textContent) || cleanPromptText(promptEl?.innerText);
+
+    if (attrPromptCandidates.length) {
+      const bestAttr = attrPromptCandidates.sort((a, b) => b.length - a.length)[0];
+      if (bestAttr.length > prompt.length) prompt = bestAttr;
+    }
+
+    const tags = Array.from(headerEl.querySelectorAll('[data-cy="feed-item-tags"]'))
+      .map((el) => cleanPromptText(el.textContent || el.innerText))
+      .filter(Boolean);
+
+    const dateGroup = cleanPromptText(
+      headerEl
+        .querySelector('[data-cy="select-all-row-button"]')
+        ?.parentElement?.querySelector("p")?.textContent
+    );
+
+    return { prompt, tags, dateGroup };
   }
 
   function parseItemsFromGrid(containerEl) {
@@ -229,12 +441,13 @@
     return items;
   }
 
-  function ensureRecord(state, key, prompt, headerIndex) {
+  function ensureRecord(state, key, prompt, headerIndex, dateGroup) {
     if (!state.records.has(key)) {
       state.records.set(key, {
         key,
         header_index: headerIndex ?? "",
         prompt: prompt || "",
+        date_group: dateGroup || "",
         tagsSet: new Set(),
         itemIdsSet: new Set(),
         itemsById: new Map()
@@ -242,6 +455,7 @@
     }
     const rec = state.records.get(key);
     if (prompt && !rec.prompt) rec.prompt = prompt;
+    if (dateGroup && !rec.date_group) rec.date_group = dateGroup;
     return rec;
   }
 
@@ -271,8 +485,46 @@
     });
   }
 
+  function buildOrderedContainers(containers) {
+    return containers
+      .slice()
+      .sort((a, b) => {
+        const ai = Number.isFinite(a.index) ? a.index : Number.POSITIVE_INFINITY;
+        const bi = Number.isFinite(b.index) ? b.index : Number.POSITIVE_INFINITY;
+        if (ai !== bi) return ai - bi;
+        return a.top - b.top;
+      });
+  }
+
+  // Безопасная привязка grid к header:
+  // 1) сначала точный/соседний индекс;
+  // 2) затем только СЛЕДУЮЩИЙ контейнер с grid (не предыдущий), с маленьким окном поиска.
+  // Никаких "последний видимый grid" — это и давало смещения.
+  function pickGridForHeader(headerContainer, gridsByIndex, orderedContainers, posByEl) {
+    if (!headerContainer) return null;
+
+    if (Number.isFinite(headerContainer.index)) {
+      const exact = gridsByIndex.get(headerContainer.index);
+      if (exact) return exact;
+      const next = gridsByIndex.get(headerContainer.index + 1);
+      if (next) return next;
+      const prev = gridsByIndex.get(headerContainer.index - 1);
+      if (prev) return prev;
+    }
+
+    const pos = posByEl.get(headerContainer.el);
+    if (!Number.isFinite(pos)) return null;
+
+    const LOOKAHEAD = 4;
+    for (let i = pos + 1; i <= Math.min(orderedContainers.length - 1, pos + LOOKAHEAD); i++) {
+      const c = orderedContainers[i];
+      if (c?.hasGrid && c.top >= headerContainer.top) return c;
+    }
+    return null;
+  }
+
   // 3) Парсинг видимых “кусочков” истории
-  function scrapeOnce(state) {
+  async function scrapeOnce(state) {
     const containers = findFeedContainers();
     const headers = containers.filter((c) => c.header);
     const grids = containers.filter((c) => c.hasGrid);
@@ -282,31 +534,29 @@
       if (Number.isFinite(g.index)) gridsByIndex.set(g.index, g);
     }
 
-    const gridsByTop = grids
-      .map((g) => ({ ...g }))
-      .sort((a, b) => a.top - b.top || (a.index ?? 0) - (b.index ?? 0));
+    const orderedContainers = buildOrderedContainers(containers);
+    const posByEl = new Map(orderedContainers.map((c, i) => [c.el, i]));
 
     for (const h of headers) {
-      const { prompt, tags } = parseHeader(h.header);
+      const { prompt, tags, dateGroup } = parseHeader(h.header);
       const headerIndex = Number.isFinite(h.index) ? h.index : "";
       const key = Number.isFinite(h.index) ? `idx:${h.index}` : `prompt:${prompt}`;
-      const rec = ensureRecord(state, key, prompt, headerIndex);
+      const rec = ensureRecord(state, key, prompt, headerIndex, dateGroup);
       mergeTags(rec, tags);
+      rec.prompt = pickBetterPrompt(rec.prompt, prompt);
 
-      // Привязка гридов: сначала по индексу, затем по позиции
-      let grid = null;
-      if (Number.isFinite(h.index)) {
-        grid =
-          gridsByIndex.get(h.index) ||
-          gridsByIndex.get(h.index - 1) ||
-          gridsByIndex.get(h.index + 1) ||
-          null;
+      // Основной путь: один раз (или до 3 раз при обрезке) пытаемся взять full prompt через кнопку Copy.
+      const attempts = state.copyAttempts.get(key) || 0;
+      const shouldTryCopy =
+        attempts === 0 ||
+        (looksPromptTruncated(rec.prompt) && attempts < SETTINGS.copyPromptMaxAttempts);
+      if (shouldTryCopy) {
+        state.copyAttempts.set(key, attempts + 1);
+        const copiedPrompt = await extractPromptViaCopy(h.header);
+        rec.prompt = pickBetterPrompt(rec.prompt, copiedPrompt);
       }
-      if (!grid && gridsByTop.length) {
-        // Берём ближайший грид по вертикали ниже
-        const below = gridsByTop.filter((g) => g.top >= h.top);
-        grid = below.length ? below[0] : gridsByTop[gridsByTop.length - 1];
-      }
+
+      const grid = pickGridForHeader(h, gridsByIndex, orderedContainers, posByEl);
 
       if (grid) {
         const items = parseItemsFromGrid(grid.el);
@@ -317,6 +567,23 @@
 
   // 4) Главный цикл прокрутки до “дна”
   async function run() {
+    if (SETTINGS.exportPreviewImages) {
+      const keepImages = window.confirm(
+        "Выгрузка с картинками может занять продолжительное время (до нескольких минут). " +
+          "Нажмите OK, чтобы продолжить, или Отмена для полной отмены выгрузки."
+      );
+      if (!keepImages) {
+        window.alert(
+          "Выгрузка отменена.\n" +
+            "Чтобы запускать только текст, переключите режим:\n" +
+            "правый клик по иконке расширения -> Режим выгрузки -> Только текст\n" +
+            "или откройте Параметры (Options)."
+        );
+        window.__freepikExporterRunning = false;
+        return;
+      }
+    }
+
     const scroller = pickScroller();
     console.log("Freepik exporter: scroller picked:", scroller);
 
@@ -336,6 +603,7 @@
 
     const state = {
       records: new Map(),
+      copyAttempts: new Map(),
       lastCount: 0,
       stagnant: 0
     };
@@ -346,7 +614,7 @@
     const MAX_ITERS = SETTINGS.maxIters;
 
     for (let i = 0; i < MAX_ITERS; i++) {
-      scrapeOnce(state);
+      await scrapeOnce(state);
 
       const count = state.records.size;
       if (count === state.lastCount) state.stagnant++;
@@ -379,6 +647,7 @@
         break;
       }
 
+      await sleep(SETTINGS.postScrollSettleMs);
       await sleep(SETTINGS.stepDelayMs);
     }
 
@@ -386,7 +655,17 @@
     ui.update(`Финализация данных… ${endReason}`);
 
     // 5) Финал: нормализуем и сохраняем
-    const out = Array.from(state.records.values()).map((r) => {
+    const exportTime = new Date();
+    const exportTimestamp = formatExportTimestamp(exportTime);
+    const { accountLabel, projectLabel, projectIdSuffix } = getExportContext();
+    const accountPart = sanitizeFilenamePart(accountLabel, "account");
+    const projectPart = sanitizeFilenamePart(projectLabel, "project");
+    const projectSuffix = projectIdSuffix ? `_${sanitizeFilenamePart(projectIdSuffix, "project")}` : "";
+    const exportBaseName = `freepik_history_${accountPart}_${projectPart}${projectSuffix}_${exportTimestamp}`;
+    const previewsDir = `${exportBaseName}_previews`;
+    const imageDownloads = [];
+
+    const out = Array.from(state.records.values()).map((r, promptIndex) => {
       const items = Array.from(r.itemsById.values());
       const tags = Array.from(r.tagsSet.values()).map((t) => t.trim()).filter(Boolean);
       const { model, quality } = deriveModelQuality(tags, items);
@@ -400,22 +679,61 @@
 
       const resolutions = uniq(items.map((i) => i.resolution).filter(Boolean));
       const types = uniq(items.map((i) => normalizeType(i.alt)).filter(Boolean));
+      const images = items
+        .map((item, imageIndex) => {
+          const previewUrl = toAbsoluteUrl(item.thumbnail);
+          if (!/^https?:\/\//i.test(previewUrl)) return null;
+
+          const imageId = cleanIdForFilename(item.id, `item${padNum(imageIndex + 1, 2)}`);
+          const imageExt = getImageExtFromUrl(previewUrl);
+          const file = `${previewsDir}/p${padNum(promptIndex + 1, 4)}_i${padNum(imageIndex + 1, 2)}_${imageId}.${imageExt}`;
+
+          imageDownloads.push({ url: previewUrl, filename: file });
+          return {
+            id: item.id || "",
+            url: previewUrl,
+            file,
+            type: normalizeType(item.alt),
+            resolution: item.resolution || ""
+          };
+        })
+        .filter(Boolean);
 
       return {
+        prompt_index: promptIndex + 1,
         prompt: r.prompt,
+        date_group: r.date_group || "",
         model,
         quality,
         types,
         resolutions,
-        tags: tagsClean
+        tags: tagsClean,
+        images
       };
     });
 
+    const uniqueImageDownloads = Array.from(
+      new Map(imageDownloads.map((entry) => [entry.filename, entry])).values()
+    );
     const jsonText = JSON.stringify(out, null, 2);
-    const filename = `freepik_history_${new Date().toISOString().slice(0, 10)}.json`;
+    const filename = `${exportBaseName}.json`;
+    const payload = {
+      type: "FREEPIK_EXPORT_READY",
+      jsonText,
+      filename,
+      imageDownloads: SETTINGS.exportPreviewImages ? uniqueImageDownloads : []
+    };
 
-    chrome.runtime.sendMessage({ type: "FREEPIK_EXPORT_READY", jsonText, filename }, () => {
-      ui.finish(`Экспорт завершён: ${out.length} промптов. ${endReason} Скачивание началось.`);
+    chrome.runtime.sendMessage(payload, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error("Freepik exporter: failed to send export payload:", chrome.runtime.lastError.message);
+      }
+      const imagesQueued =
+        Number(response?.imagesQueued || 0) ||
+        (SETTINGS.exportPreviewImages ? payload.imageDownloads.length : 0);
+      const imagePart = SETTINGS.exportPreviewImages ? ` Превью: ${imagesQueued}.` : "";
+
+      ui.finish(`Экспорт завершён: ${out.length} промптов.${imagePart} ${endReason} Скачивание началось.`);
       setTimeout(() => ui.remove(), 4000);
       window.__freepikExporterRunning = false;
     });

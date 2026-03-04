@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Freepik History to JSON - Настройки</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+
+      .wrap {
+        max-width: 720px;
+        margin: 32px auto;
+        padding: 0 16px;
+      }
+
+      .card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 20px;
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 22px;
+      }
+
+      p {
+        margin: 0 0 16px;
+        color: #334155;
+        line-height: 1.5;
+      }
+
+      .mode-row {
+        display: flex;
+        gap: 10px;
+        padding: 12px 0;
+      }
+
+      .mode-row input {
+        margin-top: 3px;
+      }
+
+      .mode-title {
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      .mode-note {
+        color: #475569;
+        font-size: 14px;
+      }
+
+      .warn {
+        margin-top: 14px;
+        font-size: 13px;
+        color: #92400e;
+        background: #fff7ed;
+        border: 1px solid #fed7aa;
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+
+      #status {
+        margin-top: 14px;
+        min-height: 20px;
+        font-size: 13px;
+        color: #0f766e;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="card">
+        <h1>Настройки экспорта</h1>
+        <p>
+          Здесь можно выбрать, экспортировать ли JSON только с текстом или вместе с превью-картинками.
+        </p>
+
+        <label class="mode-row">
+          <input type="radio" name="exportMode" value="with_images" />
+          <span>
+            <div class="mode-title">С картинками (по умолчанию)</div>
+            <div class="mode-note">
+              JSON + скачивание превью-файлов. Перед стартом будет предупреждение о длительности.
+            </div>
+          </span>
+        </label>
+
+        <label class="mode-row">
+          <input type="radio" name="exportMode" value="text_only" />
+          <span>
+            <div class="mode-title">Только текст</div>
+            <div class="mode-note">Только JSON без скачивания превью-картинок.</div>
+          </span>
+        </label>
+
+        <div class="warn">Быстрое переключение также доступно через правый клик по иконке расширения.</div>
+        <div id="status" role="status" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>
