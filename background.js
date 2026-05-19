@@ -10,6 +10,7 @@ const MENU_WITH_IMAGES_ID = "magnific-export-mode-with-images";
 const MENU_TEXT_ONLY_ID = "magnific-export-mode-text-only";
 const IMAGE_HEAD_TIMEOUT_MS = 8000;
 const IMAGE_GET_TIMEOUT_MS = 12000;
+const IMAGE_VALIDATION_CONCURRENCY = 12;
 
 function normalizeExportMode(value) {
   return EXPORT_MODE_SET.has(value) ? value : EXPORT_MODE_WITH_IMAGES;
@@ -202,16 +203,25 @@ async function inspectImageUrl(url) {
   };
 }
 
-async function inspectImageUrls(urls) {
+async function inspectImageUrls(urls, onProgress) {
   const uniqueUrls = Array.from(new Set(urls.filter((url) => /^https?:\/\//i.test(url))));
   const results = new Map();
   const queue = uniqueUrls.slice();
-  const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
+  let completed = 0;
+  const total = queue.length;
+  if (typeof onProgress === "function") {
+    onProgress({ current: 0, total });
+  }
+  const workers = Array.from({ length: Math.min(IMAGE_VALIDATION_CONCURRENCY, queue.length) }, async () => {
     while (queue.length) {
       const nextUrl = queue.shift();
       if (!nextUrl) continue;
       const result = await inspectImageUrl(nextUrl);
       results.set(nextUrl, result);
+      completed++;
+      if (typeof onProgress === "function" && (completed === total || completed % 5 === 0)) {
+        onProgress({ current: completed, total });
+      }
     }
   });
   await Promise.all(workers);
@@ -262,10 +272,11 @@ function normalizeExportRecord(record, index) {
   };
 }
 
-async function prepareExportRecords(records, exportImages) {
+async function prepareExportRecords(records, exportImages, options = {}) {
   const normalizedRecords = Array.isArray(records) ? records.map(normalizeExportRecord) : [];
   const inspectResults = await inspectImageUrls(
-    normalizedRecords.flatMap((record) => record.images.map((image) => image.url))
+    normalizedRecords.flatMap((record) => record.images.map((image) => image.url)),
+    typeof options.onValidationProgress === "function" ? options.onValidationProgress : null
   );
 
   const imageDownloads = [];
@@ -510,11 +521,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (exportImages) {
         notifyExportProgress(tabId, {
           exportSessionId,
-          stage: "validating_images"
+          stage: "validating_images",
+          current: 0,
+          total: normalizedRecords.reduce(
+            (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
+            0
+          )
         });
       }
       const prepared = Array.isArray(message.records)
-        ? await prepareExportRecords(normalizedRecords, exportImages)
+        ? await prepareExportRecords(normalizedRecords, exportImages, {
+            onValidationProgress: (progress) => {
+              notifyExportProgress(tabId, {
+                exportSessionId,
+                stage: "validating_images",
+                ...progress
+              });
+            }
+          })
         : {
             records: normalizedRecords,
             imageDownloads: rawImageDownloads

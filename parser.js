@@ -901,7 +901,10 @@
       }
 
       if (message.stage === "validating_images") {
-        ui.update(`${progressTextPrefix}${imagePart}${promptPart} Идёт проверка ссылок превью…`);
+        ui.update(
+          `${progressTextPrefix}${imagePart}${promptPart} Идёт проверка ссылок превью: ` +
+            `${Number(message.current || 0)}/${Number(message.total || resolvedImageTotal)}.`
+        );
         return;
       }
 
