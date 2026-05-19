@@ -170,6 +170,9 @@
         const spinner = overlay.querySelector("#magnific-exporter-spinner");
         if (spinner) spinner.style.display = "none";
       },
+      setStopEnabled(enabled) {
+        stopBtn.disabled = !enabled;
+      },
       remove() {
         overlay.remove();
         const styleEl = document.getElementById("magnific-exporter-style");
@@ -377,9 +380,24 @@
     return a;
   }
 
+  function buildCopyResult(status, text = "", error = null) {
+    return {
+      text: cleanPromptText(text),
+      status,
+      errorCode: String(error?.name || error?.code || "").trim(),
+      errorMessage: String(error?.message || error || "").trim()
+    };
+  }
+
   async function extractPromptViaCopy(headerEl) {
     const copyBtn = headerEl.querySelector('[data-cy="feed-family-copy-prompt-button"]');
-    if (!copyBtn) return "";
+    if (!copyBtn) return buildCopyResult("no_copy_button");
+    if (typeof document.hasFocus === "function" && !document.hasFocus()) {
+      return buildCopyResult("skipped_not_focused", "", "Document is not focused.");
+    }
+    if (document.visibilityState && document.visibilityState !== "visible") {
+      return buildCopyResult("skipped_hidden_tab", "", "Document is not visible.");
+    }
 
     const clipboard = navigator?.clipboard;
     const originalWriteText =
@@ -401,8 +419,12 @@
       }
       copyBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
       await sleep(90);
-    } catch {
-      return "";
+    } catch (error) {
+      const code = String(error?.name || error?.code || "").trim().toLowerCase();
+      if (code === "notallowederror") {
+        return buildCopyResult("failed_not_allowed", "", error);
+      }
+      return buildCopyResult("failed_exception", "", error);
     } finally {
       document.removeEventListener("copy", onCopy, false);
       try {
@@ -410,7 +432,7 @@
       } catch {}
     }
 
-    return captured;
+    return buildCopyResult(captured ? "copied" : "copied_empty", captured);
   }
 
   function parseHeader(headerEl) {
@@ -475,6 +497,12 @@
         key,
         header_index: headerIndex ?? "",
         prompt: prompt || "",
+        prompt_visible: prompt || "",
+        prompt_copied: "",
+        prompt_copy_status: "not_attempted",
+        prompt_copy_attempts: 0,
+        prompt_copy_error_code: "",
+        prompt_copy_error: "",
         date_group: dateGroup || "",
         tagsSet: new Set(),
         itemIdsSet: new Set(),
@@ -583,29 +611,46 @@
     const posByEl = new Map(orderedContainers.map((c, i) => [c.el, i]));
 
     for (const h of headers) {
-      const { prompt, tags, dateGroup } = parseHeader(h.header);
-      const headerIndex = Number.isFinite(h.index) ? h.index : "";
-      const key = Number.isFinite(h.index) ? `idx:${h.index}` : `prompt:${prompt}`;
-      const rec = ensureRecord(state, key, prompt, headerIndex, dateGroup);
-      mergeTags(rec, tags);
-      rec.prompt = pickBetterPrompt(rec.prompt, prompt);
+      try {
+        const { prompt, tags, dateGroup } = parseHeader(h.header);
+        const headerIndex = Number.isFinite(h.index) ? h.index : "";
+        const key = Number.isFinite(h.index) ? `idx:${h.index}` : `prompt:${prompt}`;
+        const rec = ensureRecord(state, key, prompt, headerIndex, dateGroup);
+        mergeTags(rec, tags);
+        rec.prompt_visible = pickBetterPrompt(rec.prompt_visible, prompt);
+        rec.prompt = pickBetterPrompt(rec.prompt, prompt);
 
-      // Основной путь: один раз (или до 3 раз при обрезке) пытаемся взять full prompt через кнопку Copy.
-      const attempts = state.copyAttempts.get(key) || 0;
-      const shouldTryCopy =
-        attempts === 0 ||
-        (looksPromptTruncated(rec.prompt) && attempts < SETTINGS.copyPromptMaxAttempts);
-      if (shouldTryCopy) {
-        state.copyAttempts.set(key, attempts + 1);
-        const copiedPrompt = await extractPromptViaCopy(h.header);
-        rec.prompt = pickBetterPrompt(rec.prompt, copiedPrompt);
-      }
+        // Copy нужен только когда видимый prompt пустой или выглядит обрезанным.
+        const attempts = state.copyAttempts.get(key) || 0;
+        const shouldTryCopy =
+          (!rec.prompt || looksPromptTruncated(rec.prompt)) && attempts < SETTINGS.copyPromptMaxAttempts;
+        if (shouldTryCopy) {
+          const nextAttempt = attempts + 1;
+          state.copyAttempts.set(key, nextAttempt);
+          rec.prompt_copy_attempts = Math.max(rec.prompt_copy_attempts || 0, nextAttempt);
+          try {
+            const copyResult = await extractPromptViaCopy(h.header);
+            rec.prompt_copy_status = copyResult.status || rec.prompt_copy_status;
+            rec.prompt_copy_error_code = copyResult.errorCode || "";
+            rec.prompt_copy_error = copyResult.errorMessage || "";
+            rec.prompt_copied = pickBetterPrompt(rec.prompt_copied, copyResult.text);
+            rec.prompt = pickBetterPrompt(rec.prompt, copyResult.text);
+          } catch (error) {
+            rec.prompt_copy_status = "failed_exception";
+            rec.prompt_copy_error_code = String(error?.name || error?.code || "").trim();
+            rec.prompt_copy_error = String(error?.message || error || "").trim();
+            console.warn("Magnific exporter: failed to copy full prompt:", error);
+          }
+        }
 
-      const grid = pickGridForHeader(h, gridsByIndex, orderedContainers, posByEl);
+        const grid = pickGridForHeader(h, gridsByIndex, orderedContainers, posByEl);
 
-      if (grid) {
-        const items = parseItemsFromGrid(grid.el);
-        mergeItems(rec, items);
+        if (grid) {
+          const items = parseItemsFromGrid(grid.el);
+          mergeItems(rec, items);
+        }
+      } catch (error) {
+        console.warn("Magnific exporter: failed to scrape feed item:", error);
       }
     }
   }
@@ -722,6 +767,24 @@
       const items = Array.from(r.itemsById.values());
       const tags = Array.from(r.tagsSet.values()).map((t) => t.trim()).filter(Boolean);
       const { model, quality } = deriveModelQuality(tags, items);
+      const promptVisible = cleanPromptText(r.prompt_visible || "");
+      const promptCopied = cleanPromptText(r.prompt_copied || "");
+      const promptFinal = pickBetterPrompt(promptVisible || r.prompt, promptCopied);
+      const domPromptLooksTruncated = looksPromptTruncated(promptVisible);
+      const promptCopiedSuccessfully = r.prompt_copy_status === "copied" && !!promptCopied;
+      const promptSource = promptCopiedSuccessfully && promptCopied.length >= promptVisible.length ? "copied" : "dom";
+      const promptNeedsReview =
+        !promptFinal ||
+        (domPromptLooksTruncated && (!promptCopiedSuccessfully || looksPromptTruncated(promptFinal)));
+      let promptIssue = "";
+      if (!promptFinal) {
+        promptIssue = "Prompt text was not found in the feed item.";
+      } else if (domPromptLooksTruncated && !promptCopiedSuccessfully) {
+        const statusLabel = r.prompt_copy_status || "unknown";
+        promptIssue = `Visible prompt looks truncated, but full prompt copy did not complete (${statusLabel}).`;
+      } else if (promptCopiedSuccessfully && looksPromptTruncated(promptFinal)) {
+        promptIssue = "Prompt still looks truncated after copy and should be reviewed.";
+      }
 
       const tagsClean = tags.filter((t) => {
         const n = norm(t);
@@ -757,7 +820,16 @@
 
       return {
         prompt_index: promptIndex + 1,
-        prompt: r.prompt,
+        prompt: promptFinal,
+        prompt_source: promptSource,
+        prompt_visible: promptVisible,
+        prompt_copied: promptCopied,
+        prompt_copy_status: r.prompt_copy_status || "not_attempted",
+        prompt_copy_attempts: Number(r.prompt_copy_attempts || 0),
+        prompt_copy_error_code: r.prompt_copy_error_code || "",
+        prompt_copy_error: r.prompt_copy_error || "",
+        prompt_needs_review: promptNeedsReview,
+        prompt_issue: promptIssue,
         date_group: r.date_group || "",
         model,
         quality,
@@ -776,32 +848,122 @@
         images
       };
     });
+    const promptReviewCount = out.filter((record) => record.prompt_needs_review).length;
+    const promptCopyIssueCount = out.filter(
+      (record) => record.prompt_needs_review && Number(record.prompt_copy_attempts || 0) > 0 && record.prompt_copy_status !== "copied"
+    ).length;
     const filename = `${exportBaseName}.json`;
+    const exportSessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const payload = {
       type: "MAGNIFIC_EXPORT_READY",
       records: out,
       filename,
-      exportImages: SETTINGS.exportPreviewImages
+      exportImages: SETTINGS.exportPreviewImages,
+      exportSessionId
     };
+    const finalizeUi = (text, delayMs = 5000) => {
+      cleanupProgressListener();
+      ui.finish(text);
+      setTimeout(() => ui.remove(), delayMs);
+      window.__magnificExporterRunning = false;
+    };
+    const progressTextPrefix = `Экспорт завершён: ${out.length} промптов.`;
+    const cleanupProgressListener = () => {
+      try {
+        chrome.runtime.onMessage.removeListener(onProgressMessage);
+      } catch {}
+    };
+    const onProgressMessage = (message) => {
+      if (!message || typeof message !== "object") return;
+      if (message.type !== "MAGNIFIC_EXPORT_PROGRESS") return;
+      if (message.exportSessionId !== exportSessionId) return;
+
+      const resolvedImageTotal = Number(
+        message.totalImages || message.total || message.imagesQueued || payload.records.reduce(
+          (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
+          0
+        )
+      );
+      const imagePart = SETTINGS.exportPreviewImages ? ` Превью: ${resolvedImageTotal}.` : "";
+      const promptPart = promptReviewCount
+        ? ` Проверить промпты: ${promptReviewCount}.`
+        : promptCopyIssueCount
+          ? ` Не удалось добрать full prompt: ${promptCopyIssueCount}.`
+          : "";
+
+      if (message.stage === "checkpoint_saved") {
+        ui.setStopEnabled(false);
+        ui.update(
+          `${progressTextPrefix}${imagePart}${promptPart} Черновой JSON сохранён. ` +
+            (SETTINGS.exportPreviewImages ? "Проверяю превью и готовлю финальный JSON…" : "Готовлю финальный JSON…")
+        );
+        return;
+      }
+
+      if (message.stage === "validating_images") {
+        ui.update(`${progressTextPrefix}${imagePart}${promptPart} Идёт проверка ссылок превью…`);
+        return;
+      }
+
+      if (message.stage === "final_json_saved") {
+        if (SETTINGS.exportPreviewImages && Number(message.totalImages || 0) > 0) {
+          ui.update(
+            `${progressTextPrefix}${imagePart}${promptPart} Финальный JSON сохранён. ` +
+              `Начинаю скачивание картинок (${Number(message.totalImages || 0)}).`
+          );
+        } else {
+          finalizeUi(`${progressTextPrefix}${imagePart}${promptPart} Финальный JSON сохранён. Скачивание завершено.`);
+        }
+        return;
+      }
+
+      if (message.stage === "downloading_images") {
+        ui.update(
+          `${progressTextPrefix}${imagePart}${promptPart} Скачиваю картинки: ${Number(message.current || 0)}/${Number(message.total || 0)}.`
+        );
+        return;
+      }
+
+      if (message.stage === "image_progress") {
+        const okPart = message.ok === false ? " Ошибка на текущем файле." : "";
+        ui.update(
+          `${progressTextPrefix}${imagePart}${promptPart} Скачиваю картинки: ${Number(message.current || 0)}/${Number(message.total || 0)}.${okPart}`
+        );
+        return;
+      }
+
+      if (message.stage === "complete") {
+        const failurePart = Number(message.imageDownloadFailures || 0)
+          ? ` Ошибок скачивания: ${Number(message.imageDownloadFailures || 0)}.`
+          : "";
+        finalizeUi(
+          `${progressTextPrefix}${imagePart}${promptPart} Финальный JSON и картинки сохранены: ` +
+            `${Number(message.imagesDownloaded || 0)}/${Number(message.totalImages || 0)}.${failurePart}`
+        );
+        return;
+      }
+
+      if (message.stage === "error") {
+        finalizeUi(
+          `${progressTextPrefix}${imagePart}${promptPart} Ошибка фоновой обработки: ${message.error || "неизвестная ошибка"}.`
+        );
+      }
+    };
+    chrome.runtime.onMessage.addListener(onProgressMessage);
 
     chrome.runtime.sendMessage(payload, (response) => {
       if (chrome.runtime.lastError) {
         console.error("Magnific exporter: failed to send export payload:", chrome.runtime.lastError.message);
+        finalizeUi("Не удалось передать данные в фоновый скрипт. Откройте консоль для деталей.");
+        return;
       }
-      const imagesQueued =
-        Number(response?.imagesQueued || 0) ||
-        (SETTINGS.exportPreviewImages
-          ? out.reduce(
-              (sum, record) =>
-                sum + record.images.filter((image) => image.status === "pending_validation").length,
-              0
-            )
-          : 0);
-      const imagePart = SETTINGS.exportPreviewImages ? ` Превью: ${imagesQueued}.` : "";
-
-      ui.finish(`Экспорт завершён: ${out.length} промптов.${imagePart} ${endReason} Скачивание началось.`);
-      setTimeout(() => ui.remove(), 4000);
-      window.__magnificExporterRunning = false;
+      if (response?.ok === false) {
+        finalizeUi(`Экспорт завершён: ${out.length} промптов. Ошибка сохранения: ${response?.error || "неизвестная ошибка"}.`);
+        return;
+      }
+      if (!response?.checkpointSaved) {
+        ui.update("Черновой JSON ещё не подтверждён. Жду ответа фонового скрипта…");
+      }
     });
   }
 

@@ -1,4 +1,5 @@
 const EXPORT_READY = "MAGNIFIC_EXPORT_READY";
+const EXPORT_PROGRESS = "MAGNIFIC_EXPORT_PROGRESS";
 const EXPORT_MODE_KEY = "exportMode";
 const EXPORT_MODE_WITH_IMAGES = "with_images";
 const EXPORT_MODE_TEXT_ONLY = "text_only";
@@ -7,6 +8,8 @@ const EXPORT_MODE_SET = new Set([EXPORT_MODE_WITH_IMAGES, EXPORT_MODE_TEXT_ONLY]
 const MENU_PARENT_ID = "magnific-export-menu-parent";
 const MENU_WITH_IMAGES_ID = "magnific-export-mode-with-images";
 const MENU_TEXT_ONLY_ID = "magnific-export-mode-text-only";
+const IMAGE_HEAD_TIMEOUT_MS = 8000;
+const IMAGE_GET_TIMEOUT_MS = 12000;
 
 function normalizeExportMode(value) {
   return EXPORT_MODE_SET.has(value) ? value : EXPORT_MODE_WITH_IMAGES;
@@ -137,12 +140,18 @@ async function inspectImageUrl(url) {
   const attempts = ["HEAD", "GET"];
 
   for (const method of attempts) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(new Error(`Image ${method} request timed out after ${method === "HEAD" ? IMAGE_HEAD_TIMEOUT_MS : IMAGE_GET_TIMEOUT_MS}ms.`)),
+      method === "HEAD" ? IMAGE_HEAD_TIMEOUT_MS : IMAGE_GET_TIMEOUT_MS
+    );
     try {
       const response = await fetch(url, {
         method,
         redirect: "follow",
         credentials: "include",
-        cache: "no-store"
+        cache: "no-store",
+        signal: controller.signal
       });
       const contentType = (response.headers.get("content-type") || "")
         .split(";")[0]
@@ -179,6 +188,8 @@ async function inspectImageUrl(url) {
           note: error?.message || "Failed to validate image URL."
         };
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -226,6 +237,16 @@ function normalizeExportRecord(record, index) {
         ? Number(record.prompt_index)
         : index + 1,
     prompt: typeof record?.prompt === "string" ? record.prompt : "",
+    prompt_source: typeof record?.prompt_source === "string" ? record.prompt_source : "",
+    prompt_visible: typeof record?.prompt_visible === "string" ? record.prompt_visible : "",
+    prompt_copied: typeof record?.prompt_copied === "string" ? record.prompt_copied : "",
+    prompt_copy_status: typeof record?.prompt_copy_status === "string" ? record.prompt_copy_status : "",
+    prompt_copy_attempts: Number.isFinite(record?.prompt_copy_attempts) ? Number(record.prompt_copy_attempts) : 0,
+    prompt_copy_error_code:
+      typeof record?.prompt_copy_error_code === "string" ? record.prompt_copy_error_code : "",
+    prompt_copy_error: typeof record?.prompt_copy_error === "string" ? record.prompt_copy_error : "",
+    prompt_needs_review: Boolean(record?.prompt_needs_review),
+    prompt_issue: typeof record?.prompt_issue === "string" ? record.prompt_issue : "",
     date_group: typeof record?.date_group === "string" ? record.date_group : "",
     model: typeof record?.model === "string" ? record.model : "",
     quality: typeof record?.quality === "string" ? record.quality : "",
@@ -319,15 +340,81 @@ async function prepareExportRecords(records, exportImages) {
   };
 }
 
+function buildPromptIssuesReport(records) {
+  return records
+    .filter((record) => record.prompt_needs_review)
+    .map((record) => ({
+      prompt_index: record.prompt_index,
+      prompt: record.prompt,
+      prompt_source: record.prompt_source,
+      prompt_visible: record.prompt_visible,
+      prompt_copied: record.prompt_copied,
+      prompt_copy_status: record.prompt_copy_status,
+      prompt_copy_attempts: record.prompt_copy_attempts,
+      prompt_copy_error_code: record.prompt_copy_error_code,
+      prompt_copy_error: record.prompt_copy_error,
+      prompt_needs_review: record.prompt_needs_review,
+      prompt_issue: record.prompt_issue,
+      date_group: record.date_group,
+      image_slot_count: record.image_slot_count,
+      image_status: record.image_status
+    }));
+}
+
 async function downloadImagesSequentially(entries) {
-  for (const entry of entries) {
-    await downloadFile({
+  let successCount = 0;
+  let failedCount = 0;
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const result = await downloadFile({
       url: entry.url,
       filename: entry.filename,
       saveAs: false
     });
+    if (result.ok) successCount++;
+    else failedCount++;
+    if (typeof entry?.onProgress === "function") {
+      entry.onProgress({
+        ok: result.ok,
+        error: result.error || "",
+        current: index + 1,
+        total: entries.length,
+        filename: entry.filename
+      });
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  return {
+    successCount,
+    failedCount,
+    total: entries.length
+  };
+}
+
+function buildDataUrlFromJson(value) {
+  return "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(value, null, 2));
+}
+
+async function downloadJsonValue(value, filename, saveAs) {
+  return downloadFile({
+    url: buildDataUrlFromJson(value),
+    filename,
+    saveAs
+  });
+}
+
+function notifyExportProgress(tabId, payload) {
+  if (!Number.isFinite(tabId)) return;
+  chrome.tabs.sendMessage(
+    tabId,
+    {
+      type: EXPORT_PROGRESS,
+      ...payload
+    },
+    () => {
+      void chrome.runtime.lastError;
+    }
+  );
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -360,12 +447,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       typeof message.filename === "string" && message.filename.trim()
         ? message.filename
         : `magnific_history_${new Date().toISOString().slice(0, 10)}.json`;
+    const exportSessionId =
+      typeof message.exportSessionId === "string" && message.exportSessionId.trim()
+        ? message.exportSessionId
+        : `session_${Date.now()}`;
+    const tabId = Number.isFinite(sender?.tab?.id) ? sender.tab.id : null;
+    const checkpointFilename = filename.replace(/\.json$/i, "_checkpoint.json");
+    const promptIssuesFilename = filename.replace(/\.json$/i, "_prompt_copy_issues.json");
 
     void (async () => {
       const exportImages = message.exportImages !== false;
-      const prepared =
+      const rawRecords =
         Array.isArray(message.records)
-          ? await prepareExportRecords(message.records, exportImages)
+          ? message.records.map(normalizeExportRecord)
           : {
               records:
                 typeof message.jsonText === "string"
@@ -383,22 +477,115 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     .filter((entry) => /^https?:\/\//i.test(entry.url) && entry.filename)
                 : []
             };
-
-      const jsonText = JSON.stringify(prepared.records, null, 2);
-      const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(jsonText);
-
-      const jsonResult = await downloadFile({
-        url: dataUrl,
-        filename,
-        saveAs: true
+      const normalizedRecords = Array.isArray(rawRecords) ? rawRecords : rawRecords.records || [];
+      const rawImageDownloads = Array.isArray(rawRecords?.imageDownloads) ? rawRecords.imageDownloads : [];
+      const promptIssues = buildPromptIssuesReport(normalizedRecords);
+      const checkpointResult = await downloadJsonValue(normalizedRecords, checkpointFilename, false);
+      if (promptIssues.length) {
+        await downloadJsonValue(promptIssues, promptIssuesFilename, false);
+      }
+      notifyExportProgress(tabId, {
+        exportSessionId,
+        stage: "checkpoint_saved",
+        checkpointSaved: checkpointResult.ok,
+        promptIssuesCount: promptIssues.length,
+        imagesQueued: normalizedRecords.reduce(
+          (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
+          0
+        ),
+        exportImages
       });
-      if (!jsonResult.ok) return;
-      if (!prepared.imageDownloads.length) return;
-      await downloadImagesSequentially(prepared.imageDownloads);
+      sendResponse({
+        ok: checkpointResult.ok,
+        checkpointSaved: checkpointResult.ok,
+        promptIssuesCount: promptIssues.length,
+        imagesQueued: normalizedRecords.reduce(
+          (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
+          0
+        ),
+        validationInBackground: exportImages
+      });
+      if (!checkpointResult.ok) return;
+
+      if (exportImages) {
+        notifyExportProgress(tabId, {
+          exportSessionId,
+          stage: "validating_images"
+        });
+      }
+      const prepared = Array.isArray(message.records)
+        ? await prepareExportRecords(normalizedRecords, exportImages)
+        : {
+            records: normalizedRecords,
+            imageDownloads: rawImageDownloads
+          };
+      const jsonResult = await downloadJsonValue(prepared.records, filename, true);
+      notifyExportProgress(tabId, {
+        exportSessionId,
+        stage: "final_json_saved",
+        ok: jsonResult.ok,
+        totalImages: prepared.imageDownloads.length
+      });
+      if (!jsonResult.ok) {
+        notifyExportProgress(tabId, {
+          exportSessionId,
+          stage: "error",
+          error: jsonResult.error || "Failed to save final JSON."
+        });
+        return;
+      }
+      if (promptIssues.length) {
+        // Файл проблемных prompt'ов уже сохранён вместе с checkpoint.
+      }
+      if (!prepared.imageDownloads.length) {
+        notifyExportProgress(tabId, {
+          exportSessionId,
+          stage: "complete",
+          imagesDownloaded: 0,
+          totalImages: 0
+        });
+        return;
+      }
+      notifyExportProgress(tabId, {
+        exportSessionId,
+        stage: "downloading_images",
+        current: 0,
+        total: prepared.imageDownloads.length
+      });
+      const imageDownloadStats = await downloadImagesSequentially(
+        prepared.imageDownloads.map((entry) => ({
+          ...entry,
+          onProgress: (progress) => {
+            notifyExportProgress(tabId, {
+              exportSessionId,
+              stage: "image_progress",
+              ...progress
+            });
+          }
+        }))
+      );
+      notifyExportProgress(tabId, {
+        exportSessionId,
+        stage: "complete",
+        imagesDownloaded: imageDownloadStats.successCount,
+        imageDownloadFailures: imageDownloadStats.failedCount,
+        totalImages: imageDownloadStats.total
+      });
     })().catch((error) => {
       console.error("Failed to prepare export payload:", error);
+      notifyExportProgress(tabId, {
+        exportSessionId,
+        stage: "error",
+        error: error?.message || "Failed to prepare export payload."
+      });
+      try {
+        sendResponse({
+          ok: false,
+          error: error?.message || "Failed to prepare export payload."
+        });
+      } catch {}
     });
 
-    sendResponse({ ok: true });
+    return true;
   }
 });
