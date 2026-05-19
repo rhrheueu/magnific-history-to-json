@@ -414,6 +414,16 @@ async function downloadJsonValue(value, filename, saveAs) {
   });
 }
 
+async function saveFallbackArtifacts({ records, promptIssues, checkpointFilename, promptIssuesFilename }) {
+  const checkpointResult = await downloadJsonValue(records, checkpointFilename, false);
+  if (Array.isArray(promptIssues) && promptIssues.length) {
+    await downloadJsonValue(promptIssues, promptIssuesFilename, false);
+  }
+  return {
+    checkpointSaved: checkpointResult.ok
+  };
+}
+
 function notifyExportProgress(tabId, payload) {
   if (!Number.isFinite(tabId)) return;
   chrome.tabs.sendMessage(
@@ -468,6 +478,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     void (async () => {
       const exportImages = message.exportImages !== false;
+      let responseSent = false;
       const rawRecords =
         Array.isArray(message.records)
           ? message.records.map(normalizeExportRecord)
@@ -491,14 +502,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const normalizedRecords = Array.isArray(rawRecords) ? rawRecords : rawRecords.records || [];
       const rawImageDownloads = Array.isArray(rawRecords?.imageDownloads) ? rawRecords.imageDownloads : [];
       const promptIssues = buildPromptIssuesReport(normalizedRecords);
-      const checkpointResult = await downloadJsonValue(normalizedRecords, checkpointFilename, false);
-      if (promptIssues.length) {
-        await downloadJsonValue(promptIssues, promptIssuesFilename, false);
-      }
       notifyExportProgress(tabId, {
         exportSessionId,
-        stage: "checkpoint_saved",
-        checkpointSaved: checkpointResult.ok,
+        stage: "processing_started",
         promptIssuesCount: promptIssues.length,
         imagesQueued: normalizedRecords.reduce(
           (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
@@ -507,8 +513,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         exportImages
       });
       sendResponse({
-        ok: checkpointResult.ok,
-        checkpointSaved: checkpointResult.ok,
+        ok: true,
         promptIssuesCount: promptIssues.length,
         imagesQueued: normalizedRecords.reduce(
           (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
@@ -516,7 +521,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ),
         validationInBackground: exportImages
       });
-      if (!checkpointResult.ok) return;
+      responseSent = true;
 
       if (exportImages) {
         notifyExportProgress(tabId, {
@@ -543,6 +548,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             records: normalizedRecords,
             imageDownloads: rawImageDownloads
           };
+      const fallbackRecords = prepared.records;
       const jsonResult = await downloadJsonValue(prepared.records, filename, true);
       notifyExportProgress(tabId, {
         exportSessionId,
@@ -551,15 +557,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         totalImages: prepared.imageDownloads.length
       });
       if (!jsonResult.ok) {
+        const fallback = await saveFallbackArtifacts({
+          records: fallbackRecords,
+          promptIssues,
+          checkpointFilename,
+          promptIssuesFilename
+        });
         notifyExportProgress(tabId, {
           exportSessionId,
           stage: "error",
-          error: jsonResult.error || "Failed to save final JSON."
+          error: jsonResult.error || "Failed to save final JSON.",
+          checkpointSaved: fallback.checkpointSaved
         });
         return;
       }
       if (promptIssues.length) {
-        // Файл проблемных prompt'ов уже сохранён вместе с checkpoint.
+        await downloadJsonValue(promptIssues, promptIssuesFilename, false);
       }
       if (!prepared.imageDownloads.length) {
         notifyExportProgress(tabId, {
@@ -597,16 +610,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     })().catch((error) => {
       console.error("Failed to prepare export payload:", error);
-      notifyExportProgress(tabId, {
-        exportSessionId,
-        stage: "error",
-        error: error?.message || "Failed to prepare export payload."
-      });
-      try {
-        sendResponse({
-          ok: false,
-          error: error?.message || "Failed to prepare export payload."
+      void (async () => {
+        let fallback = { checkpointSaved: false };
+        try {
+          const fallbackRecords = Array.isArray(message.records)
+            ? message.records.map(normalizeExportRecord)
+            : typeof message.jsonText === "string"
+              ? JSON.parse(message.jsonText)
+              : Array.isArray(message.jsonText)
+                ? message.jsonText
+                : [];
+          fallback = await saveFallbackArtifacts({
+            records: fallbackRecords,
+            promptIssues: buildPromptIssuesReport(fallbackRecords),
+            checkpointFilename,
+            promptIssuesFilename
+          });
+        } catch {}
+        notifyExportProgress(tabId, {
+          exportSessionId,
+          stage: "error",
+          error: error?.message || "Failed to prepare export payload.",
+          checkpointSaved: fallback.checkpointSaved
         });
+      })();
+      try {
+        if (!responseSent) {
+          sendResponse({
+            ok: false,
+            error: error?.message || "Failed to prepare export payload."
+          });
+        }
       } catch {}
     });
 

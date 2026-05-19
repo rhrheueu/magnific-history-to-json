@@ -891,11 +891,11 @@
           ? ` Не удалось добрать full prompt: ${promptCopyIssueCount}.`
           : "";
 
-      if (message.stage === "checkpoint_saved") {
+      if (message.stage === "processing_started") {
         ui.setStopEnabled(false);
         ui.update(
-          `${progressTextPrefix}${imagePart}${promptPart} Черновой JSON сохранён. ` +
-            (SETTINGS.exportPreviewImages ? "Проверяю превью и готовлю финальный JSON…" : "Готовлю финальный JSON…")
+          `${progressTextPrefix}${imagePart}${promptPart} ` +
+            (SETTINGS.exportPreviewImages ? "Подготовка завершена. Начинаю проверку превью…" : "Подготовка завершена. Сохраняю финальный JSON…")
         );
         return;
       }
@@ -947,8 +947,12 @@
       }
 
       if (message.stage === "error") {
+        const fallbackPart = message.checkpointSaved
+          ? " Черновой JSON сохранён как fallback."
+          : "";
         finalizeUi(
-          `${progressTextPrefix}${imagePart}${promptPart} Ошибка фоновой обработки: ${message.error || "неизвестная ошибка"}.`
+          `${progressTextPrefix}${imagePart}${promptPart} Ошибка фоновой обработки: ` +
+            `${message.error || "неизвестная ошибка"}.${fallbackPart}`
         );
       }
     };
@@ -964,9 +968,19 @@
         finalizeUi(`Экспорт завершён: ${out.length} промптов. Ошибка сохранения: ${response?.error || "неизвестная ошибка"}.`);
         return;
       }
-      if (!response?.checkpointSaved) {
-        ui.update("Черновой JSON ещё не подтверждён. Жду ответа фонового скрипта…");
-      }
+      ui.setStopEnabled(false);
+      ui.update(
+        `${progressTextPrefix}${SETTINGS.exportPreviewImages ? ` Превью: ${payload.records.reduce(
+          (sum, record) => sum + record.images.filter((image) => image.status === "pending_validation").length,
+          0
+        )}.` : ""} ${
+          promptReviewCount
+            ? `Проверить промпты: ${promptReviewCount}.`
+            : promptCopyIssueCount
+              ? `Не удалось добрать full prompt: ${promptCopyIssueCount}.`
+              : ""
+        } Подготовка данных началась…`
+      );
     });
   }
 
