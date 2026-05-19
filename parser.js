@@ -1,26 +1,30 @@
 (() => {
   // 0) Глобальный гард — не запускать повторно, пока не закончили
-  if (window.__freepikExporterRunning) {
-    alert("Freepik exporter уже запущен. Дождитесь завершения или нажмите Stop.");
+  if (window.__magnificExporterRunning) {
+    alert("Экспортёр истории уже запущен. Дождитесь завершения или нажмите Stop.");
     return;
   }
-  window.__freepikExporterRunning = true;
+  window.__magnificExporterRunning = true;
 
   // 1) Проверка страницы
   function isSupportedProjectsPath(pathname) {
-    return /^\/pikaso\/projects(?:\/|$)/.test(pathname || "");
+    return /^\/(?:pikaso\/projects|app\/projects)(?:\/|$)/.test(pathname || "");
   }
 
-  const ok =
-    location.hostname === "www.freepik.com" &&
-    isSupportedProjectsPath(location.pathname);
+  function isSupportedProjectsHost(hostname) {
+    return /(?:^|\.)magnific\.com$/i.test(hostname || "");
+  }
+
+  const ok = isSupportedProjectsHost(location.hostname) && isSupportedProjectsPath(location.pathname);
 
   if (!ok) {
-    console.warn("Freepik exporter: wrong page:", location.href);
+    console.warn("Magnific exporter: wrong page:", location.href);
     alert(
-      "Freepik exporter: open https://www.freepik.com/pikaso/projects/ (home or a specific project) first."
+      "Откройте страницу проектов Magnific:\n" +
+        "https://www.magnific.com/app/projects/work\n" +
+        "или конкретный проект вида https://www.magnific.com/app/projects/<project-id>."
     );
-    window.__freepikExporterRunning = false;
+    window.__magnificExporterRunning = false;
     return;
   }
 
@@ -29,10 +33,10 @@
   const norm = (s) => (s || "").trim().toLowerCase();
   const uniq = (arr) => Array.from(new Set(arr));
   const runtimeOptions =
-    window.__freepikExporterOptions && typeof window.__freepikExporterOptions === "object"
-      ? window.__freepikExporterOptions
+    window.__magnificExporterOptions && typeof window.__magnificExporterOptions === "object"
+      ? window.__magnificExporterOptions
       : {};
-  delete window.__freepikExporterOptions;
+  delete window.__magnificExporterOptions;
   const exportMode = runtimeOptions.exportMode === "text_only" ? "text_only" : "with_images";
   const SETTINGS = {
     // Сколько циклов подряд без новых промптов считать концом ленты.
@@ -49,18 +53,20 @@
     // Экспортировать превью-изображения рядом с JSON.
     exportPreviewImages: exportMode !== "text_only",
     // Сколько раз пробовать достать full prompt через кнопку Copy.
-    copyPromptMaxAttempts: 4
+    copyPromptMaxAttempts: 4,
+    // Дополнительная пауза после нажатия Load more.
+    loadMoreSettleMs: 1000
   };
 
   // UI прогресса
   function createOverlay() {
-    const existing = document.getElementById("freepik-exporter-overlay");
+    const existing = document.getElementById("magnific-exporter-overlay");
     if (existing) existing.remove();
 
     const style = document.createElement("style");
-    style.id = "freepik-exporter-style";
+    style.id = "magnific-exporter-style";
     style.textContent = `
-      #freepik-exporter-overlay {
+      #magnific-exporter-overlay {
         position: fixed;
         right: 16px;
         bottom: 16px;
@@ -69,14 +75,14 @@
         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
         color: #0f172a;
       }
-      #freepik-exporter-card {
+      #magnific-exporter-card {
         background: #ffffff;
         border: 1px solid #e2e8f0;
         border-radius: 12px;
         box-shadow: 0 10px 30px rgba(15, 23, 42, 0.15);
         padding: 12px 12px 10px;
       }
-      #freepik-exporter-title {
+      #magnific-exporter-title {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -84,26 +90,26 @@
         font-size: 13px;
         margin-bottom: 6px;
       }
-      #freepik-exporter-spinner {
+      #magnific-exporter-spinner {
         width: 12px;
         height: 12px;
         border: 2px solid #cbd5f5;
         border-top-color: #2563eb;
         border-radius: 999px;
-        animation: freepik-spin 1s linear infinite;
+        animation: magnific-spin 1s linear infinite;
       }
-      #freepik-exporter-body {
+      #magnific-exporter-body {
         font-size: 12px;
         line-height: 1.4;
         color: #334155;
         margin-bottom: 10px;
       }
-      #freepik-exporter-actions {
+      #magnific-exporter-actions {
         display: flex;
         gap: 8px;
         justify-content: flex-end;
       }
-      #freepik-exporter-stop {
+      #magnific-exporter-stop {
         background: #ef4444;
         color: #ffffff;
         border: none;
@@ -112,16 +118,16 @@
         font-size: 12px;
         cursor: pointer;
       }
-      #freepik-exporter-stop:disabled {
+      #magnific-exporter-stop:disabled {
         opacity: 0.6;
         cursor: default;
       }
-      #freepik-exporter-note {
+      #magnific-exporter-note {
         font-size: 11px;
         color: #64748b;
         margin-top: 6px;
       }
-      @keyframes freepik-spin {
+      @keyframes magnific-spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
       }
@@ -130,24 +136,24 @@
 
     const overlay = document.createElement("div");
     const modeLabel = SETTINGS.exportPreviewImages ? "с картинками" : "только текст";
-    overlay.id = "freepik-exporter-overlay";
+    overlay.id = "magnific-exporter-overlay";
     overlay.innerHTML = `
-      <div id="freepik-exporter-card">
-        <div id="freepik-exporter-title">
-          <div id="freepik-exporter-spinner"></div>
-          <div>Freepik exporter</div>
+      <div id="magnific-exporter-card">
+        <div id="magnific-exporter-title">
+          <div id="magnific-exporter-spinner"></div>
+          <div>Magnific exporter</div>
         </div>
-        <div id="freepik-exporter-body">Инициализация…</div>
-        <div id="freepik-exporter-actions">
-          <button id="freepik-exporter-stop">Stop</button>
+        <div id="magnific-exporter-body">Инициализация…</div>
+        <div id="magnific-exporter-actions">
+          <button id="magnific-exporter-stop">Stop</button>
         </div>
-        <div id="freepik-exporter-note">Режим: ${modeLabel}. Порог конца: ${SETTINGS.endCheckCycles} циклов без новых промптов.</div>
+        <div id="magnific-exporter-note">Режим: ${modeLabel}. Порог конца: ${SETTINGS.endCheckCycles} циклов без новых промптов.</div>
       </div>
     `;
     document.body.appendChild(overlay);
 
-    const body = overlay.querySelector("#freepik-exporter-body");
-    const stopBtn = overlay.querySelector("#freepik-exporter-stop");
+    const body = overlay.querySelector("#magnific-exporter-body");
+    const stopBtn = overlay.querySelector("#magnific-exporter-stop");
 
     return {
       update(text) {
@@ -161,12 +167,12 @@
       },
       finish(text) {
         body.textContent = text;
-        const spinner = overlay.querySelector("#freepik-exporter-spinner");
+        const spinner = overlay.querySelector("#magnific-exporter-spinner");
         if (spinner) spinner.style.display = "none";
       },
       remove() {
         overlay.remove();
-        const styleEl = document.getElementById("freepik-exporter-style");
+        const styleEl = document.getElementById("magnific-exporter-style");
         if (styleEl) styleEl.remove();
       }
     };
@@ -196,7 +202,12 @@
     const feedScroller = findScrollableAncestor(firstFeedEl);
     if (feedScroller) return feedScroller;
 
-    // 2) Fallback: самый “глубокий” scrollHeight-кандидат
+    // 2) Если лента ещё не видна целиком, пробуем оттолкнуться от кнопки Load more.
+    const loadMoreBtn = document.querySelector('[data-cy="load-more-button"]');
+    const loadMoreScroller = findScrollableAncestor(loadMoreBtn);
+    if (loadMoreScroller) return loadMoreScroller;
+
+    // 3) Fallback: самый “глубокий” scrollHeight-кандидат
     const divs = Array.from(document.querySelectorAll("div"));
     const candidates = divs
       .map((el) => {
@@ -222,7 +233,11 @@
       return n !== "auto" && n !== "default";
     });
     const model =
-      modelCandidates.find((t) => /nano|kling|stable|sd|google|pro|imagen/i.test(t)) ||
+      modelCandidates.find((t) =>
+        /nano|banana|kling|stable|sd|google|imagen|flux|veo|seedream|ideogram|recraft|midjourney|gemini|gpt|pro/i.test(
+          t
+        )
+      ) ||
       modelCandidates[0] ||
       "";
     if (!model && Array.isArray(items) && items.length) {
@@ -230,6 +245,7 @@
       if (iconHints.includes("imagen")) return { model: "Imagen", quality };
       if (iconHints.includes("stable")) return { model: "Stable Diffusion", quality };
       if (iconHints.includes("kling")) return { model: "Kling", quality };
+      if (iconHints.includes("veo")) return { model: "Veo", quality };
     }
     return { model, quality };
   }
@@ -274,8 +290,12 @@
   }
 
   function parseProjectPathSegment() {
-    const match = location.pathname.match(/^\/pikaso\/projects\/([^/?#]+)/);
-    return match?.[1] || "home";
+    const pathname = location.pathname || "";
+    const match = pathname.match(/^\/app\/projects(?:\/([^/?#]+))?/);
+    const segment = match?.[1] || "";
+    if (segment) return segment;
+    if (/^\/app\/projects(?:\/)?$/i.test(pathname)) return "work";
+    return "project";
   }
 
   function getExportContext() {
@@ -288,7 +308,10 @@
         .querySelector('[data-cy="projects-selector-sidebar-trigger"]')
         ?.textContent?.replace(/^[A-Z]\s+/, "")
     );
-    const accountLabel = accountFromHeader || accountFromSidebar || "account";
+    const accountLabel =
+      accountFromHeader ||
+      accountFromSidebar ||
+      (/magnific\.com$/i.test(location.hostname || "") ? "magnific" : "account");
 
     const topBarEl = document.querySelector('[data-cy="projects-top-bar"]');
     const topBarFirstColumnText = cleanPromptText(topBarEl?.firstElementChild?.textContent);
@@ -298,9 +321,14 @@
 
     const pathSegment = parseProjectPathSegment();
     const pathProjectLabel =
-      pathSegment === "home" || pathSegment === "history" ? pathSegment : `project_${pathSegment.slice(0, 8)}`;
+      pathSegment === "home" ||
+      pathSegment === "history" ||
+      pathSegment === "work" ||
+      pathSegment === "project"
+        ? pathSegment
+        : `project_${pathSegment.slice(0, 8)}`;
     const projectLabel =
-      pathSegment === "home" || pathSegment === "history"
+      pathSegment === "home" || pathSegment === "history" || pathSegment === "work" || pathSegment === "project"
         ? pathSegment
         : topBarFirstColumnText || topBarWholeText || pathProjectLabel;
 
@@ -485,6 +513,23 @@
     });
   }
 
+  async function clickLoadMoreIfNeeded() {
+    const btn = document.querySelector('[data-cy="load-more-button"]');
+    if (!btn || btn.disabled) return false;
+
+    const rect = btn.getBoundingClientRect();
+    const isVisible = rect.width > 0 && rect.height > 0 && rect.top < window.innerHeight + 120;
+    if (!isVisible) return false;
+
+    try {
+      btn.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {}
+
+    btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    await sleep(120);
+    return true;
+  }
+
   function buildOrderedContainers(containers) {
     return containers
       .slice()
@@ -579,13 +624,13 @@
             "правый клик по иконке расширения -> Режим выгрузки -> Только текст\n" +
             "или откройте Параметры (Options)."
         );
-        window.__freepikExporterRunning = false;
+        window.__magnificExporterRunning = false;
         return;
       }
     }
 
     const scroller = pickScroller();
-    console.log("Freepik exporter: scroller picked:", scroller);
+    console.log("Magnific exporter: scroller picked:", scroller);
 
     const ui = createOverlay();
     let stopRequested = false;
@@ -641,13 +686,22 @@
         }
       } catch {}
 
+      const clickedLoadMore = await clickLoadMoreIfNeeded();
+      if (clickedLoadMore) {
+        ui.update(
+          `Промптов: ${count}. Итерация: ${i + 1}/${MAX_ITERS}. ` +
+            `Нет новых: ${state.stagnant}/${STAGNANT_LIMIT}. Нажимаю Load more…`
+        );
+      }
+
       // “дно”: долго нет новых промптов
-      if (state.stagnant >= STAGNANT_LIMIT) {
+      if (state.stagnant >= STAGNANT_LIMIT && !clickedLoadMore) {
         endReason = `Похоже, конец ленты: ${state.stagnant} циклов без новых промптов.`;
         break;
       }
 
       await sleep(SETTINGS.postScrollSettleMs);
+      if (clickedLoadMore) await sleep(SETTINGS.loadMoreSettleMs);
       await sleep(SETTINGS.stepDelayMs);
     }
 
@@ -661,9 +715,8 @@
     const accountPart = sanitizeFilenamePart(accountLabel, "account");
     const projectPart = sanitizeFilenamePart(projectLabel, "project");
     const projectSuffix = projectIdSuffix ? `_${sanitizeFilenamePart(projectIdSuffix, "project")}` : "";
-    const exportBaseName = `freepik_history_${accountPart}_${projectPart}${projectSuffix}_${exportTimestamp}`;
+    const exportBaseName = `magnific_history_${accountPart}_${projectPart}${projectSuffix}_${exportTimestamp}`;
     const previewsDir = `${exportBaseName}_previews`;
-    const imageDownloads = [];
 
     const out = Array.from(state.records.values()).map((r, promptIndex) => {
       const items = Array.from(r.itemsById.values());
@@ -679,25 +732,28 @@
 
       const resolutions = uniq(items.map((i) => i.resolution).filter(Boolean));
       const types = uniq(items.map((i) => normalizeType(i.alt)).filter(Boolean));
-      const images = items
-        .map((item, imageIndex) => {
-          const previewUrl = toAbsoluteUrl(item.thumbnail);
-          if (!/^https?:\/\//i.test(previewUrl)) return null;
+      const images = items.map((item, imageIndex) => {
+        const previewUrl = toAbsoluteUrl(item.thumbnail);
+        const hasPreviewUrl = /^https?:\/\//i.test(previewUrl);
+        const imageId = cleanIdForFilename(item.id, `item${padNum(imageIndex + 1, 2)}`);
+        const imageExt = hasPreviewUrl ? getImageExtFromUrl(previewUrl) : "";
+        const file = hasPreviewUrl
+          ? `${previewsDir}/p${padNum(promptIndex + 1, 4)}_i${padNum(imageIndex + 1, 2)}_${imageId}.${imageExt}`
+          : "";
 
-          const imageId = cleanIdForFilename(item.id, `item${padNum(imageIndex + 1, 2)}`);
-          const imageExt = getImageExtFromUrl(previewUrl);
-          const file = `${previewsDir}/p${padNum(promptIndex + 1, 4)}_i${padNum(imageIndex + 1, 2)}_${imageId}.${imageExt}`;
+        return {
+          id: item.id || "",
+          url: hasPreviewUrl ? previewUrl : "",
+          file,
+          type: normalizeType(item.alt),
+          resolution: item.resolution || "",
+          status: hasPreviewUrl ? "pending_validation" : "missing_preview",
+          note: hasPreviewUrl ? "" : "No downloadable preview URL found in the feed item."
+        };
+      });
 
-          imageDownloads.push({ url: previewUrl, filename: file });
-          return {
-            id: item.id || "",
-            url: previewUrl,
-            file,
-            type: normalizeType(item.alt),
-            resolution: item.resolution || ""
-          };
-        })
-        .filter(Boolean);
+      const imageSlotCount = images.length;
+      const missingImageCount = images.filter((image) => image.status === "missing_preview").length;
 
       return {
         prompt_index: promptIndex + 1,
@@ -708,40 +764,50 @@
         types,
         resolutions,
         tags: tagsClean,
+        image_slot_count: imageSlotCount,
+        missing_image_count: missingImageCount,
+        image_status: imageSlotCount
+          ? missingImageCount === imageSlotCount
+            ? "all_missing_or_failed"
+            : missingImageCount > 0
+              ? "partial"
+              : "ready_for_validation"
+          : "no_items_detected",
         images
       };
     });
-
-    const uniqueImageDownloads = Array.from(
-      new Map(imageDownloads.map((entry) => [entry.filename, entry])).values()
-    );
-    const jsonText = JSON.stringify(out, null, 2);
     const filename = `${exportBaseName}.json`;
     const payload = {
-      type: "FREEPIK_EXPORT_READY",
-      jsonText,
+      type: "MAGNIFIC_EXPORT_READY",
+      records: out,
       filename,
-      imageDownloads: SETTINGS.exportPreviewImages ? uniqueImageDownloads : []
+      exportImages: SETTINGS.exportPreviewImages
     };
 
     chrome.runtime.sendMessage(payload, (response) => {
       if (chrome.runtime.lastError) {
-        console.error("Freepik exporter: failed to send export payload:", chrome.runtime.lastError.message);
+        console.error("Magnific exporter: failed to send export payload:", chrome.runtime.lastError.message);
       }
       const imagesQueued =
         Number(response?.imagesQueued || 0) ||
-        (SETTINGS.exportPreviewImages ? payload.imageDownloads.length : 0);
+        (SETTINGS.exportPreviewImages
+          ? out.reduce(
+              (sum, record) =>
+                sum + record.images.filter((image) => image.status === "pending_validation").length,
+              0
+            )
+          : 0);
       const imagePart = SETTINGS.exportPreviewImages ? ` Превью: ${imagesQueued}.` : "";
 
       ui.finish(`Экспорт завершён: ${out.length} промптов.${imagePart} ${endReason} Скачивание началось.`);
       setTimeout(() => ui.remove(), 4000);
-      window.__freepikExporterRunning = false;
+      window.__magnificExporterRunning = false;
     });
   }
 
   run().catch((e) => {
-    console.error("Freepik exporter failed:", e);
-    alert("Freepik exporter failed. Open console for details.");
-    window.__freepikExporterRunning = false;
+    console.error("Magnific exporter failed:", e);
+    alert("Экспорт завершился с ошибкой. Откройте консоль для деталей.");
+    window.__magnificExporterRunning = false;
   });
 })();

@@ -35,7 +35,7 @@ function sendMessage(message) {
 
 async function loadMode() {
   try {
-    const response = await sendMessage({ type: "FREEPIK_GET_EXPORT_MODE" });
+    const response = await sendMessage({ type: "MAGNIFIC_GET_EXPORT_MODE" });
     if (!response?.ok) throw new Error(response?.error || "Failed to load export mode.");
     applySelection(response.exportMode);
     setStatus("");
@@ -49,7 +49,7 @@ async function saveMode() {
   const exportMode = getSelectedMode();
   try {
     const response = await sendMessage({
-      type: "FREEPIK_SET_EXPORT_MODE",
+      type: "MAGNIFIC_SET_EXPORT_MODE",
       exportMode
     });
     if (!response?.ok) throw new Error(response?.error || "Failed to save export mode.");

@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Freepik History to JSON",
-  "version": "0.1.0",
-  "description": "Export Freepik prompt history to JSON for reports.",
+  "name": "Magnific History to JSON",
+  "version": "1.2",
+  "description": "Export Magnific prompt history to JSON for reports.",
   "action": {
-    "default_title": "Скачать историю Freepik",
+    "default_title": "Скачать историю Magnific",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -27,8 +27,8 @@
   },
   "permissions": ["downloads", "activeTab", "scripting", "storage", "contextMenus"],
   "host_permissions": [
-    "https://*.freepik.com/*",
-    "https://freepik.com/*",
+    "https://*.magnific.com/*",
+    "https://magnific.com/*",
     "https://*.cdnpk.net/*"
   ]
 }
