@@ -1,16 +1,7 @@
 .DS_Store
-*.json
-!manifest.json
-*.html
-!options.html
-*_files/
-Creations _ Freepik AI_files/
-Creations _ Freepik AI.html
-freepik_history_*.json
-
-# Local scratch
 *.log
+node_modules/
+dist/
 *.zip
-Guseva/
-template_pages/
-ALGORITHM_CEREBRO_FREEPIK_MAPPING.md
+magnific_history_*.json
+magnific_history_*_previews/

@@ -6,24 +6,11 @@
   }
   window.__magnificExporterRunning = true;
 
-  // 1) Проверка страницы
-  function isSupportedProjectsPath(pathname) {
-    return /^\/(?:pikaso\/projects|app\/projects)(?:\/|$)/.test(pathname || "");
-  }
-
-  function isSupportedProjectsHost(hostname) {
-    return /(?:^|\.)magnific\.com$/i.test(hostname || "");
-  }
-
-  const ok = isSupportedProjectsHost(location.hostname) && isSupportedProjectsPath(location.pathname);
-
-  if (!ok) {
-    console.warn("Magnific exporter: wrong page:", location.href);
-    alert(
-      "Откройте страницу проектов Magnific:\n" +
-        "https://www.magnific.com/app/projects/work\n" +
-        "или конкретный проект вида https://www.magnific.com/app/projects/<project-id>."
-    );
+  // 1) Проверка страницы, включая /ru/, /es/, /pt-br/.
+  const Report = globalThis.MagnificReport;
+  const Feed = globalThis.MagnificFeed;
+  if (!Report?.isSupportedPage(location.href)) {
+    Report?.showWrongPage();
     window.__magnificExporterRunning = false;
     return;
   }
@@ -45,9 +32,9 @@
     // Лимит итераций (страховка от вечного цикла).
     maxIters: 8000,
     // Пауза между итерациями (мс).
-    stepDelayMs: 700,
+    stepDelayMs: 180,
     // Дополнительная пауза после скролла, чтобы виртуальный список успел дорендерить пару header/grid.
-    postScrollSettleMs: 220,
+    postScrollSettleMs: 120,
     // Режим экспорта: with_images | text_only
     exportMode,
     // Экспортировать превью-изображения рядом с JSON.
@@ -147,7 +134,7 @@
         <div id="magnific-exporter-actions">
           <button id="magnific-exporter-stop">Stop</button>
         </div>
-        <div id="magnific-exporter-note">Режим: ${modeLabel}. Порог конца: ${SETTINGS.endCheckCycles} циклов без новых промптов.</div>
+        <div id="magnific-exporter-note">Режим: ${modeLabel}. При переключении вкладки сбор истории приостановится.</div>
       </div>
     `;
     document.body.appendChild(overlay);
@@ -228,42 +215,9 @@
     return candidates[0]?.el || document.scrollingElement || document.documentElement;
   }
 
-  function deriveModelQuality(tags, items) {
-    const tagsNorm = tags.map((t) => t.trim()).filter(Boolean);
-    const quality = tagsNorm.find((t) => norm(t) === "auto" || norm(t) === "default") || "";
-    const modelCandidates = tagsNorm.filter((t) => {
-      const n = norm(t);
-      return n !== "auto" && n !== "default";
-    });
-    const model =
-      modelCandidates.find((t) =>
-        /nano|banana|kling|stable|sd|google|imagen|flux|veo|seedream|ideogram|recraft|midjourney|gemini|gpt|pro/i.test(
-          t
-        )
-      ) ||
-      modelCandidates[0] ||
-      "";
-    if (!model && Array.isArray(items) && items.length) {
-      const iconHints = items.map((i) => i.icon || "").join(" ").toLowerCase();
-      if (iconHints.includes("imagen")) return { model: "Imagen", quality };
-      if (iconHints.includes("stable")) return { model: "Stable Diffusion", quality };
-      if (iconHints.includes("kling")) return { model: "Kling", quality };
-      if (iconHints.includes("veo")) return { model: "Veo", quality };
-    }
-    return { model, quality };
-  }
-
   function normalizeType(text) {
     if (!text) return "";
     return text.replace(/[-_]+/g, " ").trim();
-  }
-
-  function toAbsoluteUrl(url) {
-    try {
-      return new URL(String(url || ""), location.href).href;
-    } catch {
-      return "";
-    }
   }
 
   function padNum(value, size) {
@@ -293,11 +247,11 @@
   }
 
   function parseProjectPathSegment() {
-    const pathname = location.pathname || "";
-    const match = pathname.match(/^\/app\/projects(?:\/([^/?#]+))?/);
+    const pathname = Report.stripLocale(location.pathname);
+    const match = pathname.match(/^\/(?:app|pikaso)\/projects(?:\/([^/?#]+))?/);
     const segment = match?.[1] || "";
     if (segment) return segment;
-    if (/^\/app\/projects(?:\/)?$/i.test(pathname)) return "work";
+    if (/^\/(?:app|pikaso)\/projects(?:\/)?$/i.test(pathname)) return "work";
     return "project";
   }
 
@@ -324,14 +278,14 @@
 
     const pathSegment = parseProjectPathSegment();
     const pathProjectLabel =
-      pathSegment === "home" ||
+      pathSegment === "all-assets" || pathSegment === "home" ||
       pathSegment === "history" ||
       pathSegment === "work" ||
       pathSegment === "project"
         ? pathSegment
         : `project_${pathSegment.slice(0, 8)}`;
     const projectLabel =
-      pathSegment === "home" || pathSegment === "history" || pathSegment === "work" || pathSegment === "project"
+      pathSegment === "all-assets" || pathSegment === "home" || pathSegment === "history" || pathSegment === "work" || pathSegment === "project"
         ? pathSegment
         : topBarFirstColumnText || topBarWholeText || pathProjectLabel;
 
@@ -466,31 +420,6 @@
     return { prompt, tags, dateGroup };
   }
 
-  function parseItemsFromGrid(containerEl) {
-    const itemEls = containerEl.querySelectorAll('[data-item]');
-    const items = [];
-    for (const it of itemEls) {
-      const id = it.getAttribute("data-item") || it.dataset?.item || "";
-      const img = it.querySelector("img");
-      const thumbnail = img?.getAttribute("src") || "";
-      const alt = img?.getAttribute("alt") || "";
-      const badgeText = it.querySelector('[data-cy="thumbnail-badge"] span')?.textContent?.trim() || "";
-      const iconUse =
-        it.querySelector('[data-cy="thumbnail-icon-badge"] use')?.getAttribute("xlink:href") ||
-        it.querySelector('[data-cy="thumbnail-icon-badge"] use')?.getAttribute("href") ||
-        "";
-
-      items.push({
-        id,
-        alt,
-        thumbnail,
-        resolution: badgeText,
-        icon: iconUse
-      });
-    }
-    return items;
-  }
-
   function ensureRecord(state, key, prompt, headerIndex, dateGroup) {
     if (!state.records.has(key)) {
       state.records.set(key, {
@@ -520,19 +449,28 @@
   }
 
   function mergeItems(rec, items) {
+    let added = 0;
     for (const item of items) {
       const itemId = item.id || item.thumbnail || "";
       if (!itemId) continue;
       rec.itemIdsSet.add(item.id || itemId);
-      if (!rec.itemsById.has(itemId)) rec.itemsById.set(itemId, item);
+      const existing = rec.itemsById.get(itemId);
+      if (!existing) { rec.itemsById.set(itemId, item); added++; }
+      else {
+        for (const field of ["alt", "thumbnail", "resolution", "icon"]) {
+          if (!existing[field] && item[field]) existing[field] = item[field];
+        }
+        if ((!existing.media_type || existing.media_type === "unknown") && item.media_type) existing.media_type = item.media_type;
+      }
     }
+    return added;
   }
 
   function findFeedContainers() {
     const containers = Array.from(document.querySelectorAll('[data-cy="feed-virtual-item"]'));
     return containers.map((el) => {
       const indexRaw = el.getAttribute("data-index");
-      const index = indexRaw ? Number(indexRaw) : null;
+      const index = indexRaw !== null && indexRaw !== "" && Number.isFinite(Number(indexRaw)) ? Number(indexRaw) : null;
       const header = el.querySelector('[data-cy="feed-virtual-item-header"]');
       const hasGrid = !!el.querySelector('[data-cy="main-feed-item"], [data-cy="image-creation-feed-item"]');
       const rect = el.getBoundingClientRect();
@@ -558,57 +496,10 @@
     return true;
   }
 
-  function buildOrderedContainers(containers) {
-    return containers
-      .slice()
-      .sort((a, b) => {
-        const ai = Number.isFinite(a.index) ? a.index : Number.POSITIVE_INFINITY;
-        const bi = Number.isFinite(b.index) ? b.index : Number.POSITIVE_INFINITY;
-        if (ai !== bi) return ai - bi;
-        return a.top - b.top;
-      });
-  }
-
-  // Безопасная привязка grid к header:
-  // 1) сначала точный/соседний индекс;
-  // 2) затем только СЛЕДУЮЩИЙ контейнер с grid (не предыдущий), с маленьким окном поиска.
-  // Никаких "последний видимый grid" — это и давало смещения.
-  function pickGridForHeader(headerContainer, gridsByIndex, orderedContainers, posByEl) {
-    if (!headerContainer) return null;
-
-    if (Number.isFinite(headerContainer.index)) {
-      const exact = gridsByIndex.get(headerContainer.index);
-      if (exact) return exact;
-      const next = gridsByIndex.get(headerContainer.index + 1);
-      if (next) return next;
-      const prev = gridsByIndex.get(headerContainer.index - 1);
-      if (prev) return prev;
-    }
-
-    const pos = posByEl.get(headerContainer.el);
-    if (!Number.isFinite(pos)) return null;
-
-    const LOOKAHEAD = 4;
-    for (let i = pos + 1; i <= Math.min(orderedContainers.length - 1, pos + LOOKAHEAD); i++) {
-      const c = orderedContainers[i];
-      if (c?.hasGrid && c.top >= headerContainer.top) return c;
-    }
-    return null;
-  }
-
   // 3) Парсинг видимых “кусочков” истории
   async function scrapeOnce(state) {
     const containers = findFeedContainers();
     const headers = containers.filter((c) => c.header);
-    const grids = containers.filter((c) => c.hasGrid);
-
-    const gridsByIndex = new Map();
-    for (const g of grids) {
-      if (Number.isFinite(g.index)) gridsByIndex.set(g.index, g);
-    }
-
-    const orderedContainers = buildOrderedContainers(containers);
-    const posByEl = new Map(orderedContainers.map((c, i) => [c.el, i]));
 
     for (const h of headers) {
       try {
@@ -643,41 +534,43 @@
           }
         }
 
-        const grid = pickGridForHeader(h, gridsByIndex, orderedContainers, posByEl);
-
-        if (grid) {
-          const items = parseItemsFromGrid(grid.el);
-          mergeItems(rec, items);
-        }
       } catch (error) {
         console.warn("Magnific exporter: failed to scrape feed item:", error);
       }
+    }
+    for (const { grid, headerIndex } of Feed.assignGridOwners(containers, state.gridOwners)) {
+      const rec = state.records.get(`idx:${headerIndex}`);
+      // A recycled DOM node is read again on the next pass, never under its old index.
+      if (!rec || Number(grid.el.getAttribute("data-index")) !== grid.index) continue;
+      state.itemCount += mergeItems(rec, Feed.parseItems(grid.el));
     }
   }
 
   // 4) Главный цикл прокрутки до “дна”
   async function run() {
-    if (SETTINGS.exportPreviewImages) {
-      const keepImages = window.confirm(
-        "Выгрузка с картинками может занять продолжительное время (до нескольких минут). " +
-          "Нажмите OK, чтобы продолжить, или Отмена для полной отмены выгрузки."
-      );
-      if (!keepImages) {
-        window.alert(
-          "Выгрузка отменена.\n" +
-            "Чтобы запускать только текст, переключите режим:\n" +
-            "правый клик по иконке расширения -> Режим выгрузки -> Только текст\n" +
-            "или откройте Параметры (Options)."
-        );
-        window.__magnificExporterRunning = false;
-        return;
-      }
+    await Report.ensureAllAssets();
+    const selection = await Report.chooseOptions(SETTINGS.exportMode);
+    if (!selection) {
+      window.__magnificExporterRunning = false;
+      return;
     }
+    SETTINGS.exportMode = selection.exportMode;
+    SETTINGS.exportPreviewImages = selection.exportMode !== "text_only";
+    const reportPeriod = selection.period;
+    const ui = createOverlay();
+    ui.setStopEnabled(false);
+    ui.update("Применяю период отчёта к истории…");
+    try {
+      await Report.applyPeriod(reportPeriod);
+    } catch (error) {
+      ui.remove();
+      throw error;
+    }
+    ui.setStopEnabled(true);
 
     const scroller = pickScroller();
     console.log("Magnific exporter: scroller picked:", scroller);
 
-    const ui = createOverlay();
     let stopRequested = false;
     let endReason = "";
     ui.onStop(() => {
@@ -691,8 +584,14 @@
       else scroller.scrollTop = 0;
     } catch {}
 
+    // The virtual list replaces its DOM asynchronously after scrollTop changes.
+    await sleep(SETTINGS.postScrollSettleMs);
+
     const state = {
       records: new Map(),
+      gridOwners: new Map(),
+      itemCount: 0,
+      lastProgressAt: Date.now(),
       copyAttempts: new Map(),
       lastCount: 0,
       stagnant: 0
@@ -704,16 +603,21 @@
     const MAX_ITERS = SETTINGS.maxIters;
 
     for (let i = 0; i < MAX_ITERS; i++) {
+      if (!(await Report.isPageActive())) {
+        ui.update("Сбор истории на паузе. Вернитесь на эту вкладку, чтобы продолжить.");
+        while (!(await Report.isPageActive())) await sleep(400);
+      }
       await scrapeOnce(state);
 
       const count = state.records.size;
-      if (count === state.lastCount) state.stagnant++;
-      else state.stagnant = 0;
-      state.lastCount = count;
+      const progressCount = count + state.itemCount;
+      if (progressCount === state.lastCount) state.stagnant++;
+      else { state.stagnant = 0; state.lastProgressAt = Date.now(); }
+      state.lastCount = progressCount;
 
       ui.update(
-        `Промптов: ${count}. Итерация: ${i + 1}/${MAX_ITERS}. ` +
-          `Нет новых: ${state.stagnant}/${STAGNANT_LIMIT} (если растёт — значит лента заканчивается).`
+        `Обработано записей истории: ${count}. ` +
+          (state.stagnant ? "Ожидаю подгрузку истории…" : "Прокручиваю историю…")
       );
 
       if (stopRequested) {
@@ -734,13 +638,13 @@
       const clickedLoadMore = await clickLoadMoreIfNeeded();
       if (clickedLoadMore) {
         ui.update(
-          `Промптов: ${count}. Итерация: ${i + 1}/${MAX_ITERS}. ` +
-            `Нет новых: ${state.stagnant}/${STAGNANT_LIMIT}. Нажимаю Load more…`
+          `Обработано записей истории: ${count}. Загружаю следующую часть…`
         );
       }
 
       // “дно”: долго нет новых промптов
-      if (state.stagnant >= STAGNANT_LIMIT && !clickedLoadMore) {
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4;
+      if (atBottom && state.stagnant >= STAGNANT_LIMIT && Date.now()-state.lastProgressAt >= 45000 && !clickedLoadMore) {
         endReason = `Похоже, конец ленты: ${state.stagnant} циклов без новых промптов.`;
         break;
       }
@@ -760,13 +664,15 @@
     const accountPart = sanitizeFilenamePart(accountLabel, "account");
     const projectPart = sanitizeFilenamePart(projectLabel, "project");
     const projectSuffix = projectIdSuffix ? `_${sanitizeFilenamePart(projectIdSuffix, "project")}` : "";
-    const exportBaseName = `magnific_history_${accountPart}_${projectPart}${projectSuffix}_${exportTimestamp}`;
+    const periodPart = reportPeriod.preset || `${reportPeriod.start}_${reportPeriod.end}`;
+    const exportBaseName = `magnific_history_${accountPart}_${projectPart}${projectSuffix}_${periodPart}_${exportTimestamp}`;
     const previewsDir = `${exportBaseName}_previews`;
 
     const out = Array.from(state.records.values()).map((r, promptIndex) => {
       const items = Array.from(r.itemsById.values());
       const tags = Array.from(r.tagsSet.values()).map((t) => t.trim()).filter(Boolean);
-      const { model, quality } = deriveModelQuality(tags, items);
+      const { model, quality, parameters } = Feed.deriveMetadata(tags, items);
+      const uploadsOnly = items.length > 0 && items.every((item) => Report.isUploadType(item.alt));
       const promptVisible = cleanPromptText(r.prompt_visible || "");
       const promptCopied = cleanPromptText(r.prompt_copied || "");
       const promptFinal = pickBetterPrompt(promptVisible || r.prompt, promptCopied);
@@ -774,15 +680,15 @@
       const promptCopiedSuccessfully = r.prompt_copy_status === "copied" && !!promptCopied;
       const promptSource = promptCopiedSuccessfully && promptCopied.length >= promptVisible.length ? "copied" : "dom";
       const promptNeedsReview =
-        !promptFinal ||
-        (domPromptLooksTruncated && (!promptCopiedSuccessfully || looksPromptTruncated(promptFinal)));
+        (!promptFinal && !uploadsOnly) ||
+        (!uploadsOnly && domPromptLooksTruncated && (!promptCopiedSuccessfully || looksPromptTruncated(promptFinal)));
       let promptIssue = "";
-      if (!promptFinal) {
+      if (!promptFinal && !uploadsOnly) {
         promptIssue = "Prompt text was not found in the feed item.";
-      } else if (domPromptLooksTruncated && !promptCopiedSuccessfully) {
+      } else if (!uploadsOnly && domPromptLooksTruncated && !promptCopiedSuccessfully) {
         const statusLabel = r.prompt_copy_status || "unknown";
         promptIssue = `Visible prompt looks truncated, but full prompt copy did not complete (${statusLabel}).`;
-      } else if (promptCopiedSuccessfully && looksPromptTruncated(promptFinal)) {
+      } else if (!uploadsOnly && promptCopiedSuccessfully && looksPromptTruncated(promptFinal)) {
         promptIssue = "Prompt still looks truncated after copy and should be reviewed.";
       }
 
@@ -796,7 +702,7 @@
       const resolutions = uniq(items.map((i) => i.resolution).filter(Boolean));
       const types = uniq(items.map((i) => normalizeType(i.alt)).filter(Boolean));
       const images = items.map((item, imageIndex) => {
-        const previewUrl = toAbsoluteUrl(item.thumbnail);
+        const previewUrl = Feed.previewUrl(item.thumbnail, location.href);
         const hasPreviewUrl = /^https?:\/\//i.test(previewUrl);
         const imageId = cleanIdForFilename(item.id, `item${padNum(imageIndex + 1, 2)}`);
         const imageExt = hasPreviewUrl ? getImageExtFromUrl(previewUrl) : "";
@@ -809,6 +715,8 @@
           url: hasPreviewUrl ? previewUrl : "",
           file,
           type: normalizeType(item.alt),
+          asset_kind: Report.getAssetKind(item.alt),
+          media_type: item.media_type || "unknown",
           resolution: item.resolution || "",
           status: hasPreviewUrl ? "pending_validation" : "missing_preview",
           note: hasPreviewUrl ? "" : "No downloadable preview URL found in the feed item."
@@ -820,6 +728,8 @@
 
       return {
         prompt_index: promptIndex + 1,
+        feed_group_index: r.header_index,
+        exporter_version: "2.1",
         prompt: promptFinal,
         prompt_source: promptSource,
         prompt_visible: promptVisible,
@@ -831,8 +741,11 @@
         prompt_needs_review: promptNeedsReview,
         prompt_issue: promptIssue,
         date_group: r.date_group || "",
+        report_period: reportPeriod,
+        export_status: stopRequested ? "stopped" : endReason.startsWith("Достигнут") ? "iteration_limit" : "finished",
         model,
         quality,
+        parameters,
         types,
         resolutions,
         tags: tagsClean,
@@ -845,6 +758,7 @@
               ? "partial"
               : "ready_for_validation"
           : "no_items_detected",
+        asset_kinds: uniq(images.map((image) => image.asset_kind)),
         images
       };
     });
@@ -859,7 +773,9 @@
       records: out,
       filename,
       exportImages: SETTINGS.exportPreviewImages,
-      exportSessionId
+      exportSessionId,
+      period: reportPeriod,
+      exportStatus: stopRequested ? "stopped" : endReason.startsWith("Достигнут") ? "iteration_limit" : "finished"
     };
     const finalizeUi = (text, delayMs = 5000) => {
       cleanupProgressListener();
@@ -867,7 +783,8 @@
       setTimeout(() => ui.remove(), delayMs);
       window.__magnificExporterRunning = false;
     };
-    const progressTextPrefix = `Экспорт завершён: ${out.length} промптов.`;
+    const periodLabel = reportPeriod.label || `${reportPeriod.start} — ${reportPeriod.effective_end}`;
+    const progressTextPrefix = `${stopRequested ? "Сбор остановлен" : endReason.startsWith("Достигнут") ? "Достигнут лимит, сбор неполный" : "Сбор завершён"}: ${out.length} промптов. Период: ${periodLabel}.`;
     const cleanupProgressListener = () => {
       try {
         chrome.runtime.onMessage.removeListener(onProgressMessage);
@@ -891,70 +808,32 @@
           ? ` Не удалось добрать full prompt: ${promptCopyIssueCount}.`
           : "";
 
-      if (message.stage === "processing_started") {
+      if (message.stage === "archive_progress" || message.stage === "processing_started") {
         ui.setStopEnabled(false);
-        ui.update(
-          `${progressTextPrefix}${imagePart}${promptPart} ` +
-            (SETTINGS.exportPreviewImages ? "Подготовка завершена. Начинаю проверку превью…" : "Подготовка завершена. Сохраняю финальный JSON…")
-        );
+        ui.update(`${progressTextPrefix} Собираю архив: ${Number(message.current || 0)}/${Number(message.total || 0)} превью.`);
         return;
       }
-
-      if (message.stage === "validating_images") {
-        ui.update(
-          `${progressTextPrefix}${imagePart}${promptPart} Идёт проверка ссылок превью: ` +
-            `${Number(message.current || 0)}/${Number(message.total || resolvedImageTotal)}.`
-        );
+      if (message.stage === "download_started") {
+        ui.update(`${progressTextPrefix} Файл подготовлен. Сохраняю в Загрузки…`);
         return;
       }
-
-      if (message.stage === "final_json_saved") {
-        if (SETTINGS.exportPreviewImages && Number(message.totalImages || 0) > 0) {
-          ui.update(
-            `${progressTextPrefix}${imagePart}${promptPart} Финальный JSON сохранён. ` +
-              `Начинаю скачивание картинок (${Number(message.totalImages || 0)}).`
-          );
-        } else {
-          finalizeUi(`${progressTextPrefix}${imagePart}${promptPart} Финальный JSON сохранён. Скачивание завершено.`);
-        }
-        return;
-      }
-
-      if (message.stage === "downloading_images") {
-        ui.update(
-          `${progressTextPrefix}${imagePart}${promptPart} Скачиваю картинки: ${Number(message.current || 0)}/${Number(message.total || 0)}.`
-        );
-        return;
-      }
-
-      if (message.stage === "image_progress") {
-        const okPart = message.ok === false ? " Ошибка на текущем файле." : "";
-        ui.update(
-          `${progressTextPrefix}${imagePart}${promptPart} Скачиваю картинки: ${Number(message.current || 0)}/${Number(message.total || 0)}.${okPart}`
-        );
-        return;
-      }
-
       if (message.stage === "complete") {
-        const failurePart = Number(message.imageDownloadFailures || 0)
-          ? ` Ошибок скачивания: ${Number(message.imageDownloadFailures || 0)}.`
-          : "";
-        finalizeUi(
-          `${progressTextPrefix}${imagePart}${promptPart} Финальный JSON и картинки сохранены: ` +
-            `${Number(message.imagesDownloaded || 0)}/${Number(message.totalImages || 0)}.${failurePart}`
-        );
+        const failures = Number(message.imageFailures || 0);
+        finalizeUi(`${progressTextPrefix} Файл сохранён в Загрузки.${SETTINGS.exportPreviewImages ? ` Превью в архиве: ${Number(message.imagesArchived || 0)}.` : ""}${failures ? ` Не удалось получить ${failures} превью; причины записаны в JSON.` : ""}`, 15000);
         return;
       }
-
       if (message.stage === "error") {
-        const fallbackPart = message.checkpointSaved
-          ? " Черновой JSON сохранён как fallback."
-          : "";
-        finalizeUi(
-          `${progressTextPrefix}${imagePart}${promptPart} Ошибка фоновой обработки: ` +
-            `${message.error || "неизвестная ошибка"}.${fallbackPart}`
-        );
+        finalizeUi(`Ошибка сохранения: ${message.error || "неизвестная ошибка"}. Собранные данные остаются на странице. Нажмите «Сохранить JSON», чтобы скачать их отдельно.`, 120000);
+        const fallback = document.createElement("button");
+        fallback.textContent = "Сохранить JSON";
+        fallback.onclick = () => {
+          const url = URL.createObjectURL(new Blob([JSON.stringify(Feed.withoutLocalFiles(out), null, 2)], { type: "application/json" }));
+          const link = document.createElement("a"); link.href = url; link.download = filename; link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        };
+        document.querySelector("#magnific-exporter-actions")?.appendChild(fallback);
       }
+
     };
     chrome.runtime.onMessage.addListener(onProgressMessage);
 
@@ -986,7 +865,8 @@
 
   run().catch((e) => {
     console.error("Magnific exporter failed:", e);
-    alert("Экспорт завершился с ошибкой. Откройте консоль для деталей.");
+    document.getElementById("magnific-exporter-overlay")?.remove();
+    Report.showWrongPage(`Не удалось выгрузить отчёт: ${e?.message || "неизвестная ошибка"}`);
     window.__magnificExporterRunning = false;
   });
 })();

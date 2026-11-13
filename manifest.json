@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Magnific History to JSON",
-  "version": "1.5",
-  "description": "Export Magnific prompt history to JSON for reports.",
+  "version": "2.1",
+  "description": "Export Magnific history for exact report dates as JSON with previews in a single ZIP.",
   "action": {
     "default_title": "Скачать историю Magnific",
     "default_icon": {
@@ -25,10 +25,19 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "permissions": ["downloads", "activeTab", "scripting", "storage", "contextMenus"],
+  "permissions": [
+    "downloads",
+    "activeTab",
+    "scripting",
+    "storage",
+    "offscreen"
+  ],
   "host_permissions": [
     "https://*.magnific.com/*",
     "https://magnific.com/*",
-    "https://*.cdnpk.net/*"
-  ]
+    "https://*.cdnpk.net/*",
+    "https://*.freepik.com/*",
+    "https://freepik.com/*"
+  ],
+  "minimum_chrome_version": "116"
 }
